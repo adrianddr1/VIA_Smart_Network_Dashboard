@@ -27,6 +27,11 @@ if not parquet_files:
     st.error(f"No parquet files found in: {DATA_DIR.resolve()}")
     st.stop()
 
+st.write("Current file:", Path(__file__).resolve())
+st.write("Current folder:", Path.cwd())
+st.write("Looking for parquet in:", DATA_DIR.resolve())
+st.write("Files found:", list(DATA_DIR.glob("*.parquet")))
+
 
 # =====================================================
 # HELPERS
