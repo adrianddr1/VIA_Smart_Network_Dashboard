@@ -23,7 +23,7 @@ st.title("VIA Smart Network Dashboard")
 # =====================================================
 # FILE INPUT
 # =====================================================
-DATA_DIR = Path("processed")
+DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
 
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
