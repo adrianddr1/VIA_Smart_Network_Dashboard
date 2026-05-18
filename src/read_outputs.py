@@ -17,7 +17,7 @@ import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as file:
     config = yaml.load(file, Loader=SafeLoader)
