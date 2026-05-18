@@ -8,6 +8,14 @@ credentials:
       email: adrian.diaz-de-rivera@db-eco.us
       name: Adrian
       password: adrian.diaz-de-rivera@db-eco.us
+    Maurice:
+      email: maurice.tourenq@db-eco.us
+      name: Maurice
+      password: maurice.tourenq@db-eco.us
+    John:
+      email: john@irelandrailadvisory.com
+      name: John
+      password: john@irelandrailadvisory.com
 
 cookie:
   expiry_days: 1
