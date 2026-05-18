@@ -222,6 +222,13 @@ def prepare_data(df_in):
         else:
             data["total_delay_min_cn_filtered"] = 0.0
 
+    # Flag records with impossible/incomplete dispatch output
+    # These are excluded from all operational analyses.
+    data["never_dispatched_record"] = (
+        (data["departure_seconds"] == 0)
+        & (data["arrival_seconds"] > 0)
+    )
+
     data["arrival_ddhhmmss"] = data["arrival_seconds"].apply(seconds_to_ddhhmmss)
     data["departure_ddhhmmss"] = data["departure_seconds"].apply(seconds_to_ddhhmmss)
 
@@ -300,6 +307,11 @@ if st.session_state.active_view == "Main Menu":
             st.session_state.active_view = "Train Performance Table"
             st.rerun()
 
+        if st.button("5. Never Dispatched Trains", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Never Dispatched Trains"
+            st.rerun()
+
     with c2:
         if st.button("3. Speed Distribution by Train Name", width="stretch"):
             clear_memory()
@@ -326,27 +338,35 @@ st.divider()
 
 df, delay_min_cols = load_and_prepare()
 
+# Keep a separate bad-record dataframe for the new view
+never_dispatched_df = df[df["never_dispatched_record"]].copy()
+
+# Exclude bad records from all normal analyses
+analysis_df = df[~df["never_dispatched_record"]].copy()
+
 st.success(f"Loaded: {selected_file.name}")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 c1.metric("Rows", f"{len(df):,}")
-c2.metric("Train Runs", f"{df['train_label'].nunique():,}")
-c3.metric("Train Names", f"{df['train_name'].nunique():,}")
-c4.metric("Decision Points", f"{df['dp_id'].nunique():,}")
-c5.metric("Delay Columns", len(delay_min_cols))
+c2.metric("Analysis Rows", f"{len(analysis_df):,}")
+c3.metric("Excluded Records", f"{len(never_dispatched_df):,}")
+c4.metric("Train Runs", f"{analysis_df['train_label'].nunique():,}")
+c5.metric("Train Names", f"{analysis_df['train_name'].nunique():,}")
+c6.metric("Decision Points", f"{analysis_df['dp_id'].nunique():,}")
 
 with st.expander("Debug / file info"):
     st.write("Data folder:", DATA_DIR.resolve())
     st.write("Loaded file:", selected_file.name)
     st.write("Columns loaded:", list(df.columns))
     st.write("Memory MB:", round(df.memory_usage(deep=True).sum() / 1024 / 1024, 1))
-    st.write("Mileage min:", float(df["mileage"].min()))
-    st.write("Mileage max:", float(df["mileage"].max()))
-    st.write("Arrival hour min:", float(df["arrival_hour"].min()))
-    st.write("Arrival hour max:", float(df["arrival_hour"].max()))
+    st.write("Mileage min:", float(analysis_df["mileage"].min()) if not analysis_df.empty else None)
+    st.write("Mileage max:", float(analysis_df["mileage"].max()) if not analysis_df.empty else None)
+    st.write("Arrival hour min:", float(analysis_df["arrival_hour"].min()) if not analysis_df.empty else None)
+    st.write("Arrival hour max:", float(analysis_df["arrival_hour"].max()) if not analysis_df.empty else None)
+    st.write("Excluded condition: departure_seconds == 0 and arrival_seconds > 0")
 
-base_df = common_filters(df)
+base_df = common_filters(analysis_df)
 
 
 # =====================================================
@@ -356,7 +376,8 @@ if st.session_state.active_view == "Stringline":
     st.header("Stringline")
 
     st.caption(
-        "Passenger and freight are differentiated by color. Each train run is drawn as its own line."
+        "Passenger and freight are differentiated by color. Each train run is drawn as its own line. "
+        "Records with departure_seconds = 0 and arrival_seconds > 0 are excluded."
     )
 
     stringline_df = base_df[
@@ -386,8 +407,8 @@ if st.session_state.active_view == "Stringline":
         st.info("No train runs selected.")
         st.stop()
 
-    global_min_hour = float(df["arrival_hour"].min())
-    global_max_hour = float(df["arrival_hour"].max())
+    global_min_hour = float(analysis_df["arrival_hour"].min())
+    global_max_hour = float(analysis_df["arrival_hour"].max())
 
     WINDOW_HOURS = 24.0
 
@@ -476,8 +497,8 @@ if st.session_state.active_view == "Stringline":
         title="Stringline by Mileage"
     )
 
-    full_min_mile = float(df["mileage"].min())
-    full_max_mile = float(df["mileage"].max())
+    full_min_mile = float(analysis_df["mileage"].min())
+    full_max_mile = float(analysis_df["mileage"].max())
 
     fig.update_yaxes(
         range=[full_min_mile, full_max_mile],
@@ -537,7 +558,6 @@ elif st.session_state.active_view == "Train Performance Table":
         else "total_delay_min_cn_filtered"
     )
 
-    # Only keep columns needed for this view to lower memory during groupby
     perf_df = base_df[
         [
             "train_label",
@@ -838,3 +858,93 @@ elif st.session_state.active_view == "Cumulative Delay by DP and Train Group":
 
     st.subheader("Cumulative Delay Table")
     safe_dataframe(dp_group_delay, max_rows=10000)
+
+
+# =====================================================
+# 5. NEVER DISPATCHED TRAINS
+# =====================================================
+elif st.session_state.active_view == "Never Dispatched Trains":
+    st.header("Never Dispatched Trains")
+
+    st.caption(
+        "Records shown here have departure_seconds = 0 while arrival_seconds > 0. "
+        "They are excluded from all other analysis views. "
+        "For display, departure and dwell are shown as NA."
+    )
+
+    if never_dispatched_df.empty:
+        st.success("No never-dispatched records found.")
+        st.stop()
+
+    display_bad = never_dispatched_df.copy()
+
+    display_bad["departure_seconds"] = pd.NA
+    display_bad["departure_ddhhmmss"] = pd.NA
+    display_bad["dwell_seconds"] = pd.NA
+    display_bad["dwell_minutes"] = pd.NA
+
+    bad_summary = (
+        display_bad.groupby(
+            ["train_label", "generated_train_id", "train_name", "train_type"],
+            dropna=False,
+            observed=True
+        )
+        .agg(
+            bad_records=("datapoint_id", "count"),
+            first_bad_arrival_seconds=("arrival_seconds", "min"),
+            last_bad_arrival_seconds=("arrival_seconds", "max"),
+            first_bad_dp=("dp_name", "first"),
+            last_bad_dp=("dp_name", "last"),
+            min_mileage=("mileage", "min"),
+            max_mileage=("mileage", "max"),
+        )
+        .reset_index()
+        .sort_values("bad_records", ascending=False)
+    )
+
+    bad_summary["first_bad_arrival"] = bad_summary["first_bad_arrival_seconds"].apply(seconds_to_ddhhmmss)
+    bad_summary["last_bad_arrival"] = bad_summary["last_bad_arrival_seconds"].apply(seconds_to_ddhhmmss)
+
+    bad_summary = bad_summary[
+        [
+            "train_label",
+            "generated_train_id",
+            "train_name",
+            "train_type",
+            "bad_records",
+            "first_bad_arrival",
+            "last_bad_arrival",
+            "first_bad_dp",
+            "last_bad_dp",
+            "min_mileage",
+            "max_mileage",
+        ]
+    ]
+
+    st.subheader("Summary by Train")
+    safe_dataframe(bad_summary, max_rows=10000)
+
+    st.subheader("Raw Never-Dispatched Records")
+
+    raw_cols = [
+        "train_label",
+        "generated_train_id",
+        "train_name",
+        "train_type",
+        "datapoint_id",
+        "dp_id",
+        "dp_name",
+        "mileage",
+        "arrival_ddhhmmss",
+        "departure_ddhhmmss",
+        "arrival_seconds",
+        "departure_seconds",
+        "dwell_minutes",
+        "total_delay_min_all_codes",
+        "total_delay_min_cn_filtered",
+    ]
+
+    safe_dataframe(
+        display_bad[[c for c in raw_cols if c in display_bad.columns]],
+        max_rows=20000
+    )
