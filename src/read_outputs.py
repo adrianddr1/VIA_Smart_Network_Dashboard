@@ -12,7 +12,43 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import yaml
+import streamlit_authenticator as stauth
+from yaml.loader import SafeLoader
 
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as file:
+    config = yaml.load(file, Loader=SafeLoader)
+
+authenticator = stauth.Authenticate(
+    config["credentials"],
+    config["cookie"]["name"],
+    config["cookie"]["key"],
+    config["cookie"]["expiry_days"],
+)
+
+try:
+    authenticator.login(location="main")
+except Exception as e:
+    st.error(e)
+    st.stop()
+
+if st.session_state.get("authentication_status") is False:
+    st.error("Username or password is incorrect.")
+    st.stop()
+
+elif st.session_state.get("authentication_status") is None:
+    st.warning("Please enter your username and password.")
+    st.stop()
+
+elif st.session_state.get("authentication_status"):
+    authenticator.logout("Logout", "sidebar")
+    st.sidebar.success(f"Logged in as {st.session_state.get('name')}")
+    
+    
+    
 # =====================================================
 # PAGE SETUP
 # =====================================================
