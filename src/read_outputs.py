@@ -25,7 +25,7 @@ st.title("VIA Smart Network Dashboard")
 # App is in repo/src/read_outputs.py
 # Parquet files are in repo/processed/
 # =====================================================
-DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
+DATA_DIR = Path(__file__).resolve().parents[1] / "processed"
 
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
@@ -39,15 +39,19 @@ selected_file = st.sidebar.selectbox(
     format_func=lambda p: p.name
 )
 
+if st.sidebar.button("Clear cache and reload"):
+    st.cache_data.clear()
+    st.rerun()
+
 
 # =====================================================
 # HELPERS
 # =====================================================
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True, max_entries=1)
 def load_parquet(path):
     """
     Load only dashboard-needed columns from parquet.
-    This helps prevent Streamlit Cloud crashes.
+    Keeps memory lower on Streamlit Cloud.
     """
     import pyarrow.parquet as pq
 
@@ -75,9 +79,7 @@ def load_parquet(path):
 
     delay_cols = [
         c for c in schema_cols
-        if c.startswith("delay_code_")
-        or c.startswith("delay_code_group_")
-        or c.startswith("delay_minutes_")
+        if c.startswith("delay_minutes_")
         or c.startswith("included_by_cn_filter_")
     ]
 
@@ -139,8 +141,10 @@ def normalize_bool_series(s):
     )
 
 
-@st.cache_data(show_spinner=True)
 def prepare_data(df_in):
+    """
+    Do not cache this, so Streamlit does not keep another big copy.
+    """
     data = df_in.copy()
 
     # -----------------------------
@@ -168,7 +172,7 @@ def prepare_data(df_in):
 
     # -----------------------------
     # Safe string cleanup
-    # Fixes Arrow/category/string concat issue
+    # Fixes pyarrow/category string concat issue
     # -----------------------------
     if "train_name" not in data.columns:
         data["train_name"] = ""
@@ -233,7 +237,10 @@ def prepare_data(df_in):
                 filtered_parts.append(data[delay_col])
 
         if filtered_parts:
-            data["total_delay_min_cn_filtered"] = pd.concat(filtered_parts, axis=1).sum(axis=1, skipna=True)
+            data["total_delay_min_cn_filtered"] = pd.concat(
+                filtered_parts,
+                axis=1
+            ).sum(axis=1, skipna=True)
         else:
             data["total_delay_min_cn_filtered"] = 0.0
 
@@ -283,6 +290,10 @@ with st.expander("Debug / file info"):
     st.write("Loaded file:", selected_file.name)
     st.write("Columns loaded:", list(df.columns))
     st.write("Memory MB:", round(df.memory_usage(deep=True).sum() / 1024 / 1024, 1))
+    st.write("Mileage min:", float(df["mileage"].min()))
+    st.write("Mileage max:", float(df["mileage"].max()))
+    st.write("Arrival hour min:", float(df["arrival_hour"].min()))
+    st.write("Arrival hour max:", float(df["arrival_hour"].max()))
 
 
 # =====================================================
@@ -301,6 +312,8 @@ view = st.sidebar.radio(
 
 # =====================================================
 # COMMON FILTERS
+# Defaults to all trains.
+# Filters only apply if user selects something.
 # =====================================================
 st.sidebar.header("Common Filters")
 
@@ -317,9 +330,10 @@ if train_type_filter != "All":
 train_names = sorted(base_df["train_name"].astype(str).dropna().unique())
 
 selected_train_names = st.sidebar.multiselect(
-    "Select train name(s)",
+    "Optional: filter train name(s)",
     train_names,
-    default=train_names[:5]
+    default=[],
+    help="Leave empty to include all trains."
 )
 
 if selected_train_names:
@@ -337,18 +351,26 @@ if view == "1. Stringline":
     st.header("Stringline")
 
     st.caption(
-        "This view uses a fixed 24-hour window. Move the window start slider to scroll through the simulation."
+        "Fixed 24-hour window. Move the slider below to scroll through the simulation."
     )
 
-    train_labels = sorted(base_df["train_label"].astype(str).dropna().unique())
+    stringline_df = base_df[
+        base_df["mileage"].notna()
+        & base_df["arrival_hour"].notna()
+    ]
+
+    if stringline_df.empty:
+        st.info("No stringline data available.")
+        st.stop()
+
+    train_labels = sorted(stringline_df["train_label"].astype(str).dropna().unique())
 
     selected_train_labels = st.multiselect(
-        "Select specific train runs",
+        "Optional: filter specific train runs",
         train_labels,
-        default=train_labels[:3]
+        default=[],
+        help="Leave empty to show all train runs in the 24-hour window."
     )
-
-    stringline_df = base_df
 
     if selected_train_labels:
         stringline_df = stringline_df[
@@ -359,19 +381,13 @@ if view == "1. Stringline":
         st.info("No train runs selected.")
         st.stop()
 
-    min_hour = float(stringline_df["arrival_hour"].min())
-    max_hour = float(stringline_df["arrival_hour"].max())
-
-    # Fixed 24-hour window
-    WINDOW_HOURS = 24.0
-
-    # Use full data max, not selected max, so slider can go from day 0 to full horizon.
     global_min_hour = float(df["arrival_hour"].min())
     global_max_hour = float(df["arrival_hour"].max())
 
+    WINDOW_HOURS = 24.0
+
     max_start_hour = max(global_min_hour, global_max_hour - WINDOW_HOURS)
 
-    # Keep integer hour slider for stability on Streamlit Cloud
     slider_min = int(math.floor(global_min_hour))
     slider_max = int(math.ceil(max_start_hour))
 
@@ -384,37 +400,45 @@ if view == "1. Stringline":
         max_value=slider_max,
         value=slider_min,
         step=1,
-        help="Move this to scroll through the simulation. Window is always 24 hours."
+        help="This scrolls the fixed 24-hour window from day 0 through the simulation horizon."
     )
 
     end_hour = start_hour + WINDOW_HOURS
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Window Start", seconds_to_ddhhmmss(start_hour * 3600))
-    c2.metric("Window End", seconds_to_ddhhmmss(end_hour * 3600))
-    c3.metric("Window Size", "24 hours")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Window Start Hour", f"{start_hour:,.0f}")
+    c2.metric("Window End Hour", f"{end_hour:,.0f}")
+    c3.metric("Window Start Day", f"{start_hour / 24:.1f}")
+    c4.metric("Window Size", "24 hrs")
 
     chart_df = stringline_df[
         (stringline_df["arrival_hour"] >= start_hour)
         & (stringline_df["arrival_hour"] <= end_hour)
-        & (stringline_df["mileage"].notna())
     ].copy()
 
     chart_df = chart_df.sort_values(["train_label", "arrival_hour"])
 
-    st.write(f"Stringline rows in 24-hour window: {len(chart_df):,}")
+    st.write(f"Rows in window before chart cap: {len(chart_df):,}")
+    st.write(f"Train runs in window: {chart_df['train_label'].nunique():,}")
 
-    MAX_CHART_ROWS = 8000
+    if not chart_df.empty:
+        st.write(
+            f"Mileage range in window: "
+            f"{chart_df['mileage'].min():.1f} to {chart_df['mileage'].max():.1f}"
+        )
+
+    MAX_CHART_ROWS = 20000
 
     if len(chart_df) > MAX_CHART_ROWS:
         st.warning(
             f"Too many chart points: {len(chart_df):,}. "
-            f"Showing first {MAX_CHART_ROWS:,}. Select fewer train names or train runs."
+            f"Showing first {MAX_CHART_ROWS:,}. "
+            "Use train group, train name, or train run filters if you need a cleaner view."
         )
         chart_df = chart_df.head(MAX_CHART_ROWS)
 
     if chart_df.empty:
-        st.info("No data in this 24-hour window.")
+        st.info("No trains in this 24-hour window.")
         st.stop()
 
     fig = px.line(
@@ -443,20 +467,28 @@ if view == "1. Stringline":
         title="Stringline by Mileage"
     )
 
-    # Fixed visible 24-hour window
+    # Force full corridor mileage range
+    full_min_mile = float(df["mileage"].min())
+    full_max_mile = float(df["mileage"].max())
+
+    fig.update_yaxes(
+        range=[full_min_mile, full_max_mile],
+        title="Mileage"
+    )
+
     fig.update_xaxes(
         range=[start_hour, end_hour],
         dtick=2,
+        title="Simulation Time (hours)"
     )
 
-    # Zoom/pan still available from Plotly toolbar
     fig.update_layout(
         height=760,
         hovermode="closest",
         legend_title_text="Train Run",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     with st.expander("Filtered stringline data"):
         st.dataframe(
@@ -475,7 +507,7 @@ if view == "1. Stringline":
                     "total_delay_min_cn_filtered",
                 ]
             ].head(3000),
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -500,7 +532,8 @@ elif view == "2. Train Performance Table":
     run_summary = (
         base_df.groupby(
             ["train_label", "generated_train_id", "train_name", "train_type"],
-            dropna=False
+            dropna=False,
+            observed=False
         )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
@@ -530,6 +563,8 @@ elif view == "2. Train Performance Table":
 
     run_summary["first_arrival"] = run_summary["first_arrival_seconds"].apply(seconds_to_ddhhmmss)
     run_summary["last_departure"] = run_summary["last_departure_seconds"].apply(seconds_to_ddhhmmss)
+
+    run_summary = run_summary.replace([float("inf"), -float("inf")], pd.NA)
 
     run_summary = run_summary[
         [
@@ -567,7 +602,8 @@ elif view == "3. Speed Distribution by Train Name":
     run_summary = (
         base_df.groupby(
             ["train_label", "generated_train_id", "train_name", "train_type"],
-            dropna=False
+            dropna=False,
+            observed=False
         )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
@@ -594,7 +630,7 @@ elif view == "3. Speed Distribution by Train Name":
     run_summary = run_summary[run_summary["avg_speed_mph"].notna()]
 
     speed_stats = (
-        run_summary.groupby(["train_name", "train_type"], dropna=False)["avg_speed_mph"]
+        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=False)["avg_speed_mph"]
         .quantile([0, 0.25, 0.50, 0.75, 1.0])
         .unstack()
         .reset_index()
@@ -610,7 +646,7 @@ elif view == "3. Speed Distribution by Train Name":
     )
 
     run_counts = (
-        run_summary.groupby(["train_name", "train_type"], dropna=False)
+        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=False)
         .size()
         .reset_index(name="train_runs")
     )
@@ -622,6 +658,7 @@ elif view == "3. Speed Distribution by Train Name":
     )
 
     st.subheader("Speed Percentile Table")
+
     show_grid(
         speed_stats.sort_values("p50_mph"),
         key="speed_stats_table",
@@ -645,6 +682,10 @@ elif view == "3. Speed Distribution by Train Name":
         st.info("No data for selected train names.")
         st.stop()
 
+    if len(box_df) > 50000:
+        st.warning("Boxplot has too many records. Showing first 50,000.")
+        box_df = box_df.head(50000)
+
     fig = px.box(
         box_df,
         x="train_name",
@@ -663,7 +704,7 @@ elif view == "3. Speed Distribution by Train Name":
         xaxis_tickangle=-45
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 # =====================================================
@@ -738,6 +779,10 @@ elif view == "4. Average Cumulative Delay by DP":
         st.info("No delay data for selected train names.")
         st.stop()
 
+    if len(plot_delay) > 50000:
+        st.warning("Plot has too many records. Showing first 50,000.")
+        plot_delay = plot_delay.head(50000)
+
     fig = px.line(
         plot_delay,
         x="mileage",
@@ -767,7 +812,7 @@ elif view == "4. Average Cumulative Delay by DP":
         hovermode="closest"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     st.subheader("Average Cumulative Delay Table")
 
