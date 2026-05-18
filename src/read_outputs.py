@@ -25,7 +25,7 @@ st.title("VIA Smart Network Dashboard")
 # App is in repo/src/read_outputs.py
 # Parquet files are in repo/processed/
 # =====================================================
-DATA_DIR = Path(__file__).resolve().parents[1] / "processed"
+DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
 
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
