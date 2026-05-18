@@ -40,36 +40,40 @@ selected_file = st.sidebar.selectbox(
 
 @st.cache_data(show_spinner=True)
 def load_parquet(path):
-    return pd.read_parquet(path)
+    # Only load columns needed by dashboard
+    keep_cols = [
+        "datapoint_id",
+        "generated_train_id",
+        "dp_id",
+        "link_id",
+        "arrival_time",
+        "departure_time",
+        "arrival_seconds",
+        "departure_seconds",
+        "dwell_minutes",
+        "arrival_hour",
+        "parent_train_id",
+        "train_name",
+        "train_type",
+        "dp_name",
+        "mileage",
+        "train_label",
+    ]
 
+    # Add delay columns if present
+    import pyarrow.parquet as pq
+    schema_cols = pq.read_schema(path).names
 
-df = load_parquet(selected_file)
+    delay_cols = [
+        c for c in schema_cols
+        if c.startswith("delay_minutes_")
+        or c.startswith("included_by_cn_filter_")
+    ]
 
-st.success(f"Loaded: {selected_file.name}")
+    cols = [c for c in keep_cols if c in schema_cols] + delay_cols
 
+    return pd.read_parquet(path, columns=cols)
 
-# =====================================================
-# BASIC CHECKS
-# =====================================================
-required_cols = [
-    "datapoint_id",
-    "generated_train_id",
-    "train_label",
-    "train_name",
-    "train_type",
-    "dp_id",
-    "dp_name",
-    "mileage",
-    "arrival_seconds",
-    "departure_seconds",
-    "dwell_minutes",
-]
-
-missing_cols = [c for c in required_cols if c not in df.columns]
-
-if missing_cols:
-    st.error(f"Missing required columns: {missing_cols}")
-    st.stop()
 
 
 # =====================================================
@@ -262,7 +266,7 @@ train_type_filter = st.sidebar.selectbox(
     ["All", "Passenger", "Freight / Other"]
 )
 
-base_df = df.copy()
+base_df = df
 
 if train_type_filter != "All":
     base_df = base_df[base_df["train_type"] == train_type_filter]
@@ -337,7 +341,7 @@ if view == "1. Stringline":
 
     st.write(f"Stringline rows: {len(stringline_df):,}")
 
-    MAX_CHART_ROWS = 30000
+    MAX_CHART_ROWS = 3000
 
     if len(stringline_df) > MAX_CHART_ROWS:
         st.warning(
