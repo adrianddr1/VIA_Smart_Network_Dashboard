@@ -11,13 +11,18 @@ import gc
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
+from pathlib import Path
 import yaml
 import streamlit_authenticator as stauth
 from yaml.loader import SafeLoader
 
-
 CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+
+if not CONFIG_PATH.exists():
+    st.error(f"Authentication config not found at: {CONFIG_PATH}")
+    st.write("Current file:", Path(__file__).resolve())
+    st.write("Current folder:", Path(__file__).resolve().parent)
+    st.stop()
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as file:
     config = yaml.load(file, Loader=SafeLoader)
