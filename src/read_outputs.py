@@ -765,10 +765,10 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
 
 
 # =====================================================
-# 4. CUMULATIVE DELAY BY DP AND TRAIN GROUP
+# 4. AVERAGE DELAY BY DP AND TRAIN GROUP
 # =====================================================
 elif st.session_state.active_view == "Cumulative Delay by DP and Train Group":
-    st.header("Cumulative Delay by DP Location and Train Group")
+    st.header("Average Delay by DP Location and Train Group")
 
     delay_basis = st.radio(
         "Delay basis",
@@ -789,76 +789,112 @@ elif st.session_state.active_view == "Cumulative Delay by DP and Train Group":
             "dp_id",
             "dp_name",
             "mileage",
-            "arrival_seconds",
             delay_col,
         ]
     ].copy()
 
-    delay_df = delay_df.sort_values(["train_label", "arrival_seconds"])
-
-    delay_df["cumulative_delay_min"] = (
-        delay_df.groupby("train_label", observed=True)[delay_col].cumsum()
+    # First summarize total delay by train run at each DP
+    train_dp_delay = (
+        delay_df.groupby(
+            ["train_label", "train_type", "dp_id", "dp_name", "mileage"],
+            dropna=False,
+            observed=True
+        )
+        .agg(
+            train_delay_min=(delay_col, "sum")
+        )
+        .reset_index()
     )
 
+    # Then average across train runs by train group and DP
     dp_group_delay = (
-        delay_df.groupby(
+        train_dp_delay.groupby(
             ["train_type", "dp_id", "dp_name", "mileage"],
             dropna=False,
             observed=True
         )
         .agg(
-            avg_cumulative_delay_min=("cumulative_delay_min", "mean"),
-            p50_cumulative_delay_min=("cumulative_delay_min", "median"),
-            max_cumulative_delay_min=("cumulative_delay_min", "max"),
+            avg_train_delay_min=("train_delay_min", "mean"),
+            p50_train_delay_min=("train_delay_min", "median"),
+            max_train_delay_min=("train_delay_min", "max"),
             train_runs=("train_label", "nunique"),
         )
         .reset_index()
-        .sort_values(["train_type", "mileage"])
+        .sort_values(["mileage", "train_type"])
     )
 
     del delay_df
+    del train_dp_delay
     gc.collect()
 
-    st.subheader("Cumulative Delay Plot")
+    st.subheader("Average Train Delay by DP")
 
     if dp_group_delay.empty:
         st.info("No delay data available.")
         st.stop()
 
-    fig = px.line(
-        dp_group_delay,
-        x="mileage",
-        y="avg_cumulative_delay_min",
+    # Optional: let user limit to top DPs if chart is crowded
+    top_n = st.slider(
+        "Show top N DP locations by total average delay",
+        min_value=10,
+        max_value=min(200, dp_group_delay["dp_id"].nunique()),
+        value=min(50, dp_group_delay["dp_id"].nunique()),
+        step=10
+    )
+
+    top_dp_ids = (
+        dp_group_delay.groupby(["dp_id", "dp_name", "mileage"], dropna=False, observed=True)
+        .agg(total_avg_delay_min=("avg_train_delay_min", "sum"))
+        .reset_index()
+        .sort_values("total_avg_delay_min", ascending=False)
+        .head(top_n)["dp_id"]
+        .tolist()
+    )
+
+    plot_df = dp_group_delay[dp_group_delay["dp_id"].isin(top_dp_ids)].copy()
+
+    plot_df["dp_label"] = (
+        plot_df["mileage"].round(1).astype(str)
+        + " | "
+        + plot_df["dp_name"].astype(str)
+    )
+
+    plot_df = plot_df.sort_values("mileage")
+
+    fig = px.bar(
+        plot_df,
+        x="dp_label",
+        y="avg_train_delay_min",
         color="train_type",
-        markers=True,
+        barmode="stack",
         hover_data=[
             "train_type",
             "dp_id",
             "dp_name",
             "mileage",
-            "avg_cumulative_delay_min",
-            "p50_cumulative_delay_min",
-            "max_cumulative_delay_min",
+            "avg_train_delay_min",
+            "p50_train_delay_min",
+            "max_train_delay_min",
             "train_runs",
         ],
-        title="Average Cumulative Delay by DP Location and Train Group",
+        title="Stacked Average Train Delay by DP Location",
         labels={
-            "mileage": "Mileage",
-            "avg_cumulative_delay_min": "Average Cumulative Delay (min)",
+            "dp_label": "DP Location",
+            "avg_train_delay_min": "Average Train Delay (min)",
             "train_type": "Train Group",
         },
     )
 
     fig.update_layout(
         height=720,
-        hovermode="closest"
+        xaxis_tickangle=-60,
+        hovermode="closest",
     )
 
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Cumulative Delay Table")
+    st.subheader("Average Delay Table")
     safe_dataframe(dp_group_delay, max_rows=10000)
-
 
 # =====================================================
 # 5. NEVER DISPATCHED TRAINS
