@@ -5,7 +5,7 @@ Created on Thu May 14 23:31:22 2026
 @author: ZhaoJ
 """
 from pathlib import Path
-import re
+import math
 
 import pandas as pd
 import plotly.express as px
@@ -22,8 +22,10 @@ st.title("VIA Smart Network Dashboard")
 
 # =====================================================
 # FILE INPUT
+# App is in repo/src/read_outputs.py
+# Parquet files are in repo/processed/
 # =====================================================
-DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
+DATA_DIR = Path(__file__).resolve().parents[1] / "processed"
 
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
@@ -38,35 +40,44 @@ selected_file = st.sidebar.selectbox(
 )
 
 
+# =====================================================
+# HELPERS
+# =====================================================
 @st.cache_data(show_spinner=True)
 def load_parquet(path):
-    # Only load columns needed by dashboard
+    """
+    Load only dashboard-needed columns from parquet.
+    This helps prevent Streamlit Cloud crashes.
+    """
+    import pyarrow.parquet as pq
+
+    schema_cols = pq.read_schema(path).names
+
     keep_cols = [
         "datapoint_id",
         "generated_train_id",
-        "dp_id",
-        "link_id",
-        "arrival_time",
-        "departure_time",
-        "arrival_seconds",
-        "departure_seconds",
-        "dwell_minutes",
-        "arrival_hour",
         "parent_train_id",
         "train_name",
         "train_type",
+        "train_label",
+        "dp_id",
         "dp_name",
         "mileage",
-        "train_label",
+        "link_id",
+        "arrival_seconds",
+        "departure_seconds",
+        "arrival_hour",
+        "dwell_seconds",
+        "dwell_minutes",
+        "total_delay_min_all_codes",
+        "total_delay_min_cn_filtered",
     ]
-
-    # Add delay columns if present
-    import pyarrow.parquet as pq
-    schema_cols = pq.read_schema(path).names
 
     delay_cols = [
         c for c in schema_cols
-        if c.startswith("delay_minutes_")
+        if c.startswith("delay_code_")
+        or c.startswith("delay_code_group_")
+        or c.startswith("delay_minutes_")
         or c.startswith("included_by_cn_filter_")
     ]
 
@@ -75,36 +86,22 @@ def load_parquet(path):
     return pd.read_parquet(path, columns=cols)
 
 
-
-# =====================================================
-# HELPER FUNCTIONS
-# =====================================================
 def seconds_to_ddhhmmss(seconds):
     if pd.isna(seconds):
         return ""
 
     seconds = int(seconds)
+
     d = seconds // 86400
     seconds %= 86400
+
     h = seconds // 3600
     seconds %= 3600
+
     m = seconds // 60
     s = seconds % 60
 
     return f"{d:03}:{h:02}:{m:02}:{s:02}"
-
-
-def ddhhmmss_to_seconds(text):
-    if not isinstance(text, str):
-        return None
-
-    m = re.match(r"^(\d+):(\d{1,2}):(\d{1,2}):(\d{1,2})$", text.strip())
-
-    if not m:
-        return None
-
-    d, h, mnt, s = map(int, m.groups())
-    return d * 86400 + h * 3600 + mnt * 60 + s
 
 
 def show_grid(data, key, height=650, page_size=100):
@@ -133,9 +130,6 @@ def show_grid(data, key, height=650, page_size=100):
 
 
 def normalize_bool_series(s):
-    """
-    Handles bool, TRUE/FALSE strings, 1/0, and missing values.
-    """
     return (
         s.astype(str)
         .str.strip()
@@ -145,94 +139,136 @@ def normalize_bool_series(s):
     )
 
 
-def add_delay_columns(data):
-    """
-    Creates:
-    - row_delay_all_min
-    - row_delay_cn_filtered_min
-
-    Uses delay_minutes_1, delay_minutes_2, ...
-    and included_by_cn_filter_1, included_by_cn_filter_2, ...
-    """
-
-    data = data.copy()
-
-    delay_min_cols = sorted(
-        [c for c in data.columns if c.startswith("delay_minutes_")],
-        key=lambda x: int(x.split("_")[-1])
-    )
-
-    data[delay_min_cols] = data[delay_min_cols].apply(
-        pd.to_numeric,
-        errors="coerce"
-    )
-
-    if not delay_min_cols:
-        data["row_delay_all_min"] = 0.0
-        data["row_delay_cn_filtered_min"] = 0.0
-        return data, delay_min_cols
-
-    data["row_delay_all_min"] = data[delay_min_cols].sum(axis=1, skipna=True)
-
-    filtered_delay_parts = []
-
-    for delay_col in delay_min_cols:
-        seq = delay_col.split("_")[-1]
-        filter_col = f"included_by_cn_filter_{seq}"
-
-        if filter_col in data.columns:
-            include_mask = normalize_bool_series(data[filter_col])
-            filtered_delay_parts.append(data[delay_col].where(include_mask, 0))
-        else:
-            filtered_delay_parts.append(data[delay_col].fillna(0))
-
-    if filtered_delay_parts:
-        data["row_delay_cn_filtered_min"] = pd.concat(
-            filtered_delay_parts,
-            axis=1
-        ).sum(axis=1, skipna=True)
-    else:
-        data["row_delay_cn_filtered_min"] = 0.0
-
-    return data, delay_min_cols
-
-
 @st.cache_data(show_spinner=True)
 def prepare_data(df_in):
     data = df_in.copy()
 
-    data["mileage"] = pd.to_numeric(data["mileage"], errors="coerce")
-    data["arrival_seconds"] = pd.to_numeric(data["arrival_seconds"], errors="coerce")
-    data["departure_seconds"] = pd.to_numeric(data["departure_seconds"], errors="coerce")
-    data["dwell_minutes"] = pd.to_numeric(data["dwell_minutes"], errors="coerce").fillna(0)
+    # -----------------------------
+    # Numeric cleanup
+    # -----------------------------
+    numeric_cols = [
+        "datapoint_id",
+        "generated_train_id",
+        "parent_train_id",
+        "dp_id",
+        "link_id",
+        "mileage",
+        "arrival_seconds",
+        "departure_seconds",
+        "arrival_hour",
+        "dwell_seconds",
+        "dwell_minutes",
+        "total_delay_min_all_codes",
+        "total_delay_min_cn_filtered",
+    ]
 
-    data["arrival_hour"] = data["arrival_seconds"] / 3600
-    data["departure_hour"] = data["departure_seconds"] / 3600
+    for col in numeric_cols:
+        if col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    data["arrival_ddhhmmss"] = data["arrival_seconds"].apply(seconds_to_ddhhmmss)
-    data["departure_ddhhmmss"] = data["departure_seconds"].apply(seconds_to_ddhhmmss)
+    # -----------------------------
+    # Safe string cleanup
+    # Fixes Arrow/category/string concat issue
+    # -----------------------------
+    if "train_name" not in data.columns:
+        data["train_name"] = ""
 
-    data["train_name"] = data["train_name"].fillna("")
-    data["train_label"] = data["train_label"].fillna(
-        data["generated_train_id"].astype(str) + " | " + data["train_name"]
-    )
+    data["train_name"] = data["train_name"].astype("string").fillna("")
 
     if "train_type" not in data.columns:
         data["train_type"] = data["train_name"].apply(
             lambda x: "Passenger" if isinstance(x, str) and x.startswith("P") else "Freight / Other"
         )
 
-    data, delay_min_cols = add_delay_columns(data)
+    data["train_type"] = data["train_type"].astype("string").fillna("Unknown")
+
+    if "dp_name" in data.columns:
+        data["dp_name"] = data["dp_name"].astype("string").fillna("")
+    else:
+        data["dp_name"] = ""
+
+    data["generated_train_id_str"] = data["generated_train_id"].astype("string").fillna("")
+
+    if "train_label" not in data.columns:
+        data["train_label"] = data["generated_train_id_str"] + " | " + data["train_name"]
+    else:
+        data["train_label"] = data["train_label"].astype("string").fillna("")
+        missing_label = data["train_label"].str.strip().eq("")
+        data.loc[missing_label, "train_label"] = (
+            data.loc[missing_label, "generated_train_id_str"]
+            + " | "
+            + data.loc[missing_label, "train_name"]
+        )
+
+    data = data.drop(columns=["generated_train_id_str"])
+
+    # -----------------------------
+    # If total delay columns are missing, rebuild them
+    # -----------------------------
+    delay_min_cols = sorted(
+        [c for c in data.columns if c.startswith("delay_minutes_")],
+        key=lambda x: int(x.split("_")[-1])
+    )
+
+    for col in delay_min_cols:
+        data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0)
+
+    if "total_delay_min_all_codes" not in data.columns:
+        if delay_min_cols:
+            data["total_delay_min_all_codes"] = data[delay_min_cols].sum(axis=1, skipna=True)
+        else:
+            data["total_delay_min_all_codes"] = 0.0
+
+    if "total_delay_min_cn_filtered" not in data.columns:
+        filtered_parts = []
+
+        for delay_col in delay_min_cols:
+            seq = delay_col.split("_")[-1]
+            include_col = f"included_by_cn_filter_{seq}"
+
+            if include_col in data.columns:
+                include_mask = normalize_bool_series(data[include_col])
+                filtered_parts.append(data[delay_col].where(include_mask, 0))
+            else:
+                filtered_parts.append(data[delay_col])
+
+        if filtered_parts:
+            data["total_delay_min_cn_filtered"] = pd.concat(filtered_parts, axis=1).sum(axis=1, skipna=True)
+        else:
+            data["total_delay_min_cn_filtered"] = 0.0
+
+    # -----------------------------
+    # Display time
+    # -----------------------------
+    data["arrival_ddhhmmss"] = data["arrival_seconds"].apply(seconds_to_ddhhmmss)
+    data["departure_ddhhmmss"] = data["departure_seconds"].apply(seconds_to_ddhhmmss)
+
+    # -----------------------------
+    # Reduce display memory
+    # -----------------------------
+    for col in ["train_name", "train_type", "train_label", "dp_name"]:
+        if col in data.columns:
+            data[col] = data[col].astype("category")
 
     return data, delay_min_cols
 
+
+# =====================================================
+# LOAD DATA
+# =====================================================
 df = load_parquet(selected_file)
-st.success(f"Loaded: {selected_file.name}")
+
+if df.empty:
+    st.error("Selected parquet file is empty.")
+    st.stop()
+
 df, delay_min_cols = prepare_data(df)
+
+st.success(f"Loaded: {selected_file.name}")
 
 
 # =====================================================
-# METRICS
+# TOP METRICS
 # =====================================================
 c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -241,6 +277,12 @@ c2.metric("Train Runs", f"{df['train_label'].nunique():,}")
 c3.metric("Train Names", f"{df['train_name'].nunique():,}")
 c4.metric("Decision Points", f"{df['dp_id'].nunique():,}")
 c5.metric("Delay Columns", len(delay_min_cols))
+
+with st.expander("Debug / file info"):
+    st.write("Data folder:", DATA_DIR.resolve())
+    st.write("Loaded file:", selected_file.name)
+    st.write("Columns loaded:", list(df.columns))
+    st.write("Memory MB:", round(df.memory_usage(deep=True).sum() / 1024 / 1024, 1))
 
 
 # =====================================================
@@ -264,24 +306,24 @@ st.sidebar.header("Common Filters")
 
 train_type_filter = st.sidebar.selectbox(
     "Train group",
-    ["All", "Passenger", "Freight / Other"]
+    ["All", "Passenger", "Freight / Other", "Unknown"]
 )
 
 base_df = df
 
 if train_type_filter != "All":
-    base_df = base_df[base_df["train_type"] == train_type_filter]
+    base_df = base_df[base_df["train_type"].astype(str) == train_type_filter]
 
-train_names = sorted(base_df["train_name"].dropna().unique())
+train_names = sorted(base_df["train_name"].astype(str).dropna().unique())
 
 selected_train_names = st.sidebar.multiselect(
     "Select train name(s)",
     train_names,
-    default=train_names[:10]
+    default=train_names[:5]
 )
 
 if selected_train_names:
-    base_df = base_df[base_df["train_name"].isin(selected_train_names)]
+    base_df = base_df[base_df["train_name"].astype(str).isin(selected_train_names)]
 
 if base_df.empty:
     st.warning("No data after filters.")
@@ -289,74 +331,94 @@ if base_df.empty:
 
 
 # =====================================================
-# VIEW 1: STRINGLINE
+# 1. STRINGLINE
 # =====================================================
 if view == "1. Stringline":
     st.header("Stringline")
 
-    train_labels = sorted(base_df["train_label"].dropna().unique())
+    st.caption(
+        "This view uses a fixed 24-hour window. Move the window start slider to scroll through the simulation."
+    )
+
+    train_labels = sorted(base_df["train_label"].astype(str).dropna().unique())
 
     selected_train_labels = st.multiselect(
-        "Highlight / plot specific train runs",
+        "Select specific train runs",
         train_labels,
-        default=train_labels[:10]
+        default=train_labels[:3]
     )
 
-    stringline_df = base_df.copy()
+    stringline_df = base_df
 
     if selected_train_labels:
-        stringline_df = stringline_df[stringline_df["train_label"].isin(selected_train_labels)]
+        stringline_df = stringline_df[
+            stringline_df["train_label"].astype(str).isin(selected_train_labels)
+        ]
 
-    min_sec = stringline_df["arrival_seconds"].min()
-    max_sec = stringline_df["arrival_seconds"].max()
-
-    default_start = seconds_to_ddhhmmss(min_sec)
-    default_end = seconds_to_ddhhmmss(min(min_sec + 24 * 3600, max_sec))
-
-    c1, c2 = st.columns(2)
-
-    start_text = c1.text_input(
-        "Start time DD:HH:MM:SS",
-        value=default_start
-    )
-
-    end_text = c2.text_input(
-        "End time DD:HH:MM:SS",
-        value=default_end
-    )
-
-    start_sec = ddhhmmss_to_seconds(start_text)
-    end_sec = ddhhmmss_to_seconds(end_text)
-
-    if start_sec is None or end_sec is None:
-        st.error("Invalid time format. Use DD:HH:MM:SS, for example 000:00:00:00.")
+    if stringline_df.empty:
+        st.info("No train runs selected.")
         st.stop()
 
-    stringline_df = stringline_df[
-        (stringline_df["arrival_seconds"] >= start_sec)
-        & (stringline_df["arrival_seconds"] <= end_sec)
+    min_hour = float(stringline_df["arrival_hour"].min())
+    max_hour = float(stringline_df["arrival_hour"].max())
+
+    # Fixed 24-hour window
+    WINDOW_HOURS = 24.0
+
+    # Use full data max, not selected max, so slider can go from day 0 to full horizon.
+    global_min_hour = float(df["arrival_hour"].min())
+    global_max_hour = float(df["arrival_hour"].max())
+
+    max_start_hour = max(global_min_hour, global_max_hour - WINDOW_HOURS)
+
+    # Keep integer hour slider for stability on Streamlit Cloud
+    slider_min = int(math.floor(global_min_hour))
+    slider_max = int(math.ceil(max_start_hour))
+
+    if slider_max <= slider_min:
+        slider_max = slider_min + 1
+
+    start_hour = st.slider(
+        "Move 24-hour window start time",
+        min_value=slider_min,
+        max_value=slider_max,
+        value=slider_min,
+        step=1,
+        help="Move this to scroll through the simulation. Window is always 24 hours."
+    )
+
+    end_hour = start_hour + WINDOW_HOURS
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Window Start", seconds_to_ddhhmmss(start_hour * 3600))
+    c2.metric("Window End", seconds_to_ddhhmmss(end_hour * 3600))
+    c3.metric("Window Size", "24 hours")
+
+    chart_df = stringline_df[
+        (stringline_df["arrival_hour"] >= start_hour)
+        & (stringline_df["arrival_hour"] <= end_hour)
         & (stringline_df["mileage"].notna())
     ].copy()
 
-    stringline_df = stringline_df.sort_values(["train_label", "arrival_seconds"])
+    chart_df = chart_df.sort_values(["train_label", "arrival_hour"])
 
-    st.write(f"Stringline rows: {len(stringline_df):,}")
+    st.write(f"Stringline rows in 24-hour window: {len(chart_df):,}")
 
-    MAX_CHART_ROWS = 3000
+    MAX_CHART_ROWS = 8000
 
-    if len(stringline_df) > MAX_CHART_ROWS:
+    if len(chart_df) > MAX_CHART_ROWS:
         st.warning(
-            f"Too many rows for the chart ({len(stringline_df):,}). "
-            f"Showing first {MAX_CHART_ROWS:,}. Select fewer trains or a shorter time window."
+            f"Too many chart points: {len(chart_df):,}. "
+            f"Showing first {MAX_CHART_ROWS:,}. Select fewer train names or train runs."
         )
-        stringline_df = stringline_df.head(MAX_CHART_ROWS)
+        chart_df = chart_df.head(MAX_CHART_ROWS)
 
-    if stringline_df.empty:
-        st.info("No data in selected window.")
+    if chart_df.empty:
+        st.info("No data in this 24-hour window.")
         st.stop()
 
     fig = px.line(
-        stringline_df,
+        chart_df,
         x="arrival_hour",
         y="mileage",
         color="train_label",
@@ -370,32 +432,24 @@ if view == "1. Stringline":
             "arrival_ddhhmmss",
             "departure_ddhhmmss",
             "dwell_minutes",
-            "row_delay_all_min",
-            "row_delay_cn_filtered_min",
+            "total_delay_min_all_codes",
+            "total_delay_min_cn_filtered",
         ],
         labels={
             "arrival_hour": "Simulation Time (hours)",
             "mileage": "Mileage",
             "train_label": "Train Run",
         },
-        title="Stringline by Train Run"
+        title="Stringline by Mileage"
     )
 
-    # Plotly zoom/pan is built in.
-    # Range slider underneath allows scrolling through the full selected range.
+    # Fixed visible 24-hour window
     fig.update_xaxes(
-        range=[start_sec / 3600, end_sec / 3600],
-        rangeslider=dict(visible=True),
-        rangeselector=dict(
-            buttons=[
-                dict(count=6, label="6h", step="hour", stepmode="backward"),
-                dict(count=12, label="12h", step="hour", stepmode="backward"),
-                dict(count=24, label="24h", step="hour", stepmode="backward"),
-                dict(step="all", label="All"),
-            ]
-        )
+        range=[start_hour, end_hour],
+        dtick=2,
     )
 
+    # Zoom/pan still available from Plotly toolbar
     fig.update_layout(
         height=760,
         hovermode="closest",
@@ -406,7 +460,7 @@ if view == "1. Stringline":
 
     with st.expander("Filtered stringline data"):
         st.dataframe(
-            stringline_df[
+            chart_df[
                 [
                     "train_label",
                     "train_name",
@@ -417,16 +471,16 @@ if view == "1. Stringline":
                     "arrival_ddhhmmss",
                     "departure_ddhhmmss",
                     "dwell_minutes",
-                    "row_delay_all_min",
-                    "row_delay_cn_filtered_min",
+                    "total_delay_min_all_codes",
+                    "total_delay_min_cn_filtered",
                 ]
-            ].head(5000),
+            ].head(3000),
             use_container_width=True
         )
 
 
 # =====================================================
-# VIEW 2: TRAIN PERFORMANCE TABLE
+# 2. TRAIN PERFORMANCE TABLE
 # =====================================================
 elif view == "2. Train Performance Table":
     st.header("Train Performance Table")
@@ -438,18 +492,19 @@ elif view == "2. Train Performance Table":
     )
 
     delay_col = (
-        "row_delay_all_min"
+        "total_delay_min_all_codes"
         if delay_basis == "All delay codes"
-        else "row_delay_cn_filtered_min"
+        else "total_delay_min_cn_filtered"
     )
 
     run_summary = (
-        base_df.groupby(["train_label", "generated_train_id", "train_name", "train_type"], dropna=False)
+        base_df.groupby(
+            ["train_label", "generated_train_id", "train_name", "train_type"],
+            dropna=False
+        )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
             last_departure_seconds=("departure_seconds", "max"),
-            first_mileage=("mileage", "first"),
-            last_mileage=("mileage", "last"),
             min_mileage=("mileage", "min"),
             max_mileage=("mileage", "max"),
             datapoints=("datapoint_id", "count"),
@@ -465,7 +520,6 @@ elif view == "2. Train Performance Table":
         run_summary["last_departure_seconds"] - run_summary["first_arrival_seconds"]
     ) / 3600
 
-    # Use mileage range as practical distance covered.
     run_summary["route_miles"] = (
         run_summary["max_mileage"] - run_summary["min_mileage"]
     ).abs()
@@ -505,13 +559,16 @@ elif view == "2. Train Performance Table":
 
 
 # =====================================================
-# VIEW 3: SPEED DISTRIBUTION BY TRAIN NAME
+# 3. SPEED DISTRIBUTION BY TRAIN NAME
 # =====================================================
 elif view == "3. Speed Distribution by Train Name":
     st.header("Speed Distribution by Train Name")
 
     run_summary = (
-        base_df.groupby(["train_label", "generated_train_id", "train_name", "train_type"], dropna=False)
+        base_df.groupby(
+            ["train_label", "generated_train_id", "train_name", "train_type"],
+            dropna=False
+        )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
             last_departure_seconds=("departure_seconds", "max"),
@@ -533,9 +590,8 @@ elif view == "3. Speed Distribution by Train Name":
         run_summary["route_miles"] / run_summary["trip_duration_hr"]
     )
 
-    run_summary = run_summary[
-        run_summary["avg_speed_mph"].replace([float("inf"), -float("inf")], pd.NA).notna()
-    ]
+    run_summary = run_summary.replace([float("inf"), -float("inf")], pd.NA)
+    run_summary = run_summary[run_summary["avg_speed_mph"].notna()]
 
     speed_stats = (
         run_summary.groupby(["train_name", "train_type"], dropna=False)["avg_speed_mph"]
@@ -575,13 +631,19 @@ elif view == "3. Speed Distribution by Train Name":
 
     st.subheader("Speed Boxplot")
 
-    plot_limit_names = st.multiselect(
+    available_names = sorted(run_summary["train_name"].astype(str).dropna().unique())
+
+    plot_names = st.multiselect(
         "Train names to include in boxplot",
-        sorted(run_summary["train_name"].dropna().unique()),
-        default=sorted(run_summary["train_name"].dropna().unique())[:20]
+        available_names,
+        default=available_names[:20]
     )
 
-    box_df = run_summary[run_summary["train_name"].isin(plot_limit_names)]
+    box_df = run_summary[run_summary["train_name"].astype(str).isin(plot_names)]
+
+    if box_df.empty:
+        st.info("No data for selected train names.")
+        st.stop()
 
     fig = px.box(
         box_df,
@@ -605,7 +667,7 @@ elif view == "3. Speed Distribution by Train Name":
 
 
 # =====================================================
-# VIEW 4: AVERAGE CUMULATIVE DELAY BY DP
+# 4. AVERAGE CUMULATIVE DELAY BY DP
 # =====================================================
 elif view == "4. Average Cumulative Delay by DP":
     st.header("Average Cumulative Delay by DP")
@@ -617,9 +679,9 @@ elif view == "4. Average Cumulative Delay by DP":
     )
 
     delay_col = (
-        "row_delay_all_min"
+        "total_delay_min_all_codes"
         if delay_basis == "All delay codes"
-        else "row_delay_cn_filtered_min"
+        else "total_delay_min_cn_filtered"
     )
 
     delay_df = base_df[
@@ -639,12 +701,15 @@ elif view == "4. Average Cumulative Delay by DP":
     delay_df = delay_df.sort_values(["train_label", "arrival_seconds"])
 
     delay_df["cumulative_delay_min"] = (
-        delay_df.groupby("train_label")[delay_col].cumsum()
+        delay_df.groupby("train_label", observed=False)[delay_col].cumsum()
     )
 
-    # Average repeated daily/synthetic runs by train_name and DP.
     avg_delay = (
-        delay_df.groupby(["train_name", "train_type", "dp_id", "dp_name", "mileage"], dropna=False)
+        delay_df.groupby(
+            ["train_name", "train_type", "dp_id", "dp_name", "mileage"],
+            dropna=False,
+            observed=False
+        )
         .agg(
             avg_cumulative_delay_min=("cumulative_delay_min", "mean"),
             p50_cumulative_delay_min=("cumulative_delay_min", "median"),
@@ -655,17 +720,23 @@ elif view == "4. Average Cumulative Delay by DP":
         .sort_values(["train_name", "mileage"])
     )
 
-    selected_delay_train_names = st.multiselect(
+    available_delay_names = sorted(avg_delay["train_name"].astype(str).dropna().unique())
+
+    selected_delay_names = st.multiselect(
         "Select train names for cumulative delay plot",
-        sorted(avg_delay["train_name"].dropna().unique()),
-        default=sorted(avg_delay["train_name"].dropna().unique())[:10]
+        available_delay_names,
+        default=available_delay_names[:10]
     )
 
     plot_delay = avg_delay[
-        avg_delay["train_name"].isin(selected_delay_train_names)
+        avg_delay["train_name"].astype(str).isin(selected_delay_names)
     ].copy()
 
     st.subheader("Average Cumulative Delay Plot")
+
+    if plot_delay.empty:
+        st.info("No delay data for selected train names.")
+        st.stop()
 
     fig = px.line(
         plot_delay,
