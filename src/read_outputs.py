@@ -11,7 +11,6 @@ import gc
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder
 
 
 # =====================================================
@@ -23,8 +22,9 @@ st.title("VIA Smart Network Dashboard")
 
 # =====================================================
 # PATHS
-# App is in repo/src/read_outputs.py
-# Parquet files are in repo/processed/
+# repo/
+# ├── src/read_outputs.py
+# └── processed/*.parquet
 # =====================================================
 DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
 
@@ -36,17 +36,15 @@ if not parquet_files:
 
 
 # =====================================================
-# SESSION STATE / MAIN MENU
+# SESSION STATE
 # =====================================================
 if "active_view" not in st.session_state:
     st.session_state.active_view = "Main Menu"
 
 
-def clear_memory_and_go(view_name):
+def clear_memory():
     st.cache_data.clear()
     gc.collect()
-    st.session_state.active_view = view_name
-    st.rerun()
 
 
 selected_file = st.sidebar.selectbox(
@@ -56,8 +54,7 @@ selected_file = st.sidebar.selectbox(
 )
 
 if st.sidebar.button("Clear cache and reload"):
-    st.cache_data.clear()
-    gc.collect()
+    clear_memory()
     st.rerun()
 
 
@@ -67,8 +64,7 @@ if st.sidebar.button("Clear cache and reload"):
 @st.cache_data(show_spinner=True, max_entries=1)
 def load_parquet(path):
     """
-    Load only dashboard-needed columns from parquet.
-    Keeps memory lower on Streamlit Cloud.
+    Load only dashboard-needed columns.
     """
     import pyarrow.parquet as pq
 
@@ -123,31 +119,6 @@ def seconds_to_ddhhmmss(seconds):
     return f"{d:03}:{h:02}:{m:02}:{s:02}"
 
 
-def show_grid(data, key, height=650, page_size=100):
-    gb = GridOptionsBuilder.from_dataframe(data)
-
-    gb.configure_default_column(
-        sortable=True,
-        filter=True,
-        resizable=True,
-        editable=False
-    )
-
-    gb.configure_grid_options(
-        pagination=True,
-        paginationPageSize=page_size,
-        enableRangeSelection=True
-    )
-
-    AgGrid(
-        data,
-        gridOptions=gb.build(),
-        height=height,
-        fit_columns_on_grid_load=False,
-        key=key
-    )
-
-
 def normalize_bool_series(s):
     return (
         s.astype(str)
@@ -160,7 +131,7 @@ def normalize_bool_series(s):
 
 def prepare_data(df_in):
     """
-    Not cached on purpose, so Streamlit does not keep another big copy.
+    Do not cache this to avoid duplicate cached dataframe copies.
     """
     data = df_in.copy()
 
@@ -304,6 +275,11 @@ def common_filters(df):
     return base_df
 
 
+def safe_dataframe(df, max_rows=5000):
+    st.caption(f"Showing first {min(len(df), max_rows):,} rows out of {len(df):,}.")
+    st.dataframe(df.head(max_rows), width="stretch")
+
+
 # =====================================================
 # MAIN MENU
 # =====================================================
@@ -314,43 +290,37 @@ if st.session_state.active_view == "Main Menu":
     c1, c2 = st.columns(2)
 
     with c1:
-        st.button(
-            "1. Stringline",
-            width="stretch",
-            on_click=clear_memory_and_go,
-            args=("Stringline",)
-        )
+        if st.button("1. Stringline", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Stringline"
+            st.rerun()
 
-        st.button(
-            "2. Train Performance Table",
-            width="stretch",
-            on_click=clear_memory_and_go,
-            args=("Train Performance Table",)
-        )
+        if st.button("2. Train Performance Table", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Train Performance Table"
+            st.rerun()
 
     with c2:
-        st.button(
-            "3. Speed Distribution by Train Name",
-            width="stretch",
-            on_click=clear_memory_and_go,
-            args=("Speed Distribution by Train Name",)
-        )
+        if st.button("3. Speed Distribution by Train Name", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Speed Distribution by Train Name"
+            st.rerun()
 
-        st.button(
-            "4. Average Cumulative Delay by DP",
-            width="stretch",
-            on_click=clear_memory_and_go,
-            args=("Average Cumulative Delay by DP",)
-        )
+        if st.button("4. Cumulative Delay by DP and Train Group", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Cumulative Delay by DP and Train Group"
+            st.rerun()
 
     st.stop()
 
 
 # =====================================================
-# VIEW HEADER + BACK BUTTON
+# VIEW HEADER
 # =====================================================
 if st.button("Back to Main Menu / Clear Memory", width="stretch"):
-    clear_memory_and_go("Main Menu")
+    clear_memory()
+    st.session_state.active_view = "Main Menu"
+    st.rerun()
 
 st.divider()
 
@@ -386,7 +356,7 @@ if st.session_state.active_view == "Stringline":
     st.header("Stringline")
 
     st.caption(
-        "Passenger and freight are differentiated by line color. Each train run is drawn as its own line."
+        "Passenger and freight are differentiated by color. Each train run is drawn as its own line."
     )
 
     stringline_df = base_df[
@@ -429,15 +399,6 @@ if st.session_state.active_view == "Stringline":
     if slider_max <= slider_min:
         slider_max = slider_min + 1
 
-    start_hour_default = slider_min
-    end_hour_default = start_hour_default + WINDOW_HOURS
-
-    chart_df = stringline_df[
-        (stringline_df["arrival_hour"] >= start_hour_default)
-        & (stringline_df["arrival_hour"] <= end_hour_default)
-    ].copy()
-
-    # Placeholder lets the chart appear above the slider while the slider value still controls the chart.
     chart_placeholder = st.empty()
 
     start_hour = st.slider(
@@ -479,7 +440,7 @@ if st.session_state.active_view == "Stringline":
         st.warning(
             f"Too many chart points: {len(chart_df):,}. "
             f"Showing first {MAX_CHART_ROWS:,}. "
-            "Use train group, train name, or train run filters if you need a cleaner view."
+            "Use train group, train name, or train run filters if needed."
         )
         chart_df = chart_df.head(MAX_CHART_ROWS)
 
@@ -538,7 +499,7 @@ if st.session_state.active_view == "Stringline":
     chart_placeholder.plotly_chart(fig, width="stretch")
 
     with st.expander("Filtered stringline data"):
-        st.dataframe(
+        safe_dataframe(
             chart_df[
                 [
                     "train_label",
@@ -553,8 +514,8 @@ if st.session_state.active_view == "Stringline":
                     "total_delay_min_all_codes",
                     "total_delay_min_cn_filtered",
                 ]
-            ].head(3000),
-            width="stretch"
+            ],
+            max_rows=3000
         )
 
 
@@ -576,11 +537,27 @@ elif st.session_state.active_view == "Train Performance Table":
         else "total_delay_min_cn_filtered"
     )
 
+    # Only keep columns needed for this view to lower memory during groupby
+    perf_df = base_df[
+        [
+            "train_label",
+            "generated_train_id",
+            "train_name",
+            "train_type",
+            "arrival_seconds",
+            "departure_seconds",
+            "mileage",
+            "datapoint_id",
+            "dwell_minutes",
+            delay_col,
+        ]
+    ].copy()
+
     run_summary = (
-        base_df.groupby(
+        perf_df.groupby(
             ["train_label", "generated_train_id", "train_name", "train_type"],
             dropna=False,
-            observed=False
+            observed=True
         )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
@@ -595,6 +572,9 @@ elif st.session_state.active_view == "Train Performance Table":
         )
         .reset_index()
     )
+
+    del perf_df
+    gc.collect()
 
     run_summary["trip_duration_hr"] = (
         run_summary["last_departure_seconds"] - run_summary["first_arrival_seconds"]
@@ -632,12 +612,7 @@ elif st.session_state.active_view == "Train Performance Table":
         ]
     ].sort_values("avg_speed_mph")
 
-    show_grid(
-        run_summary,
-        key="train_performance_table",
-        height=700,
-        page_size=100
-    )
+    safe_dataframe(run_summary, max_rows=10000)
 
 
 # =====================================================
@@ -646,11 +621,23 @@ elif st.session_state.active_view == "Train Performance Table":
 elif st.session_state.active_view == "Speed Distribution by Train Name":
     st.header("Speed Distribution by Train Name")
 
+    speed_df = base_df[
+        [
+            "train_label",
+            "generated_train_id",
+            "train_name",
+            "train_type",
+            "arrival_seconds",
+            "departure_seconds",
+            "mileage",
+        ]
+    ].copy()
+
     run_summary = (
-        base_df.groupby(
+        speed_df.groupby(
             ["train_label", "generated_train_id", "train_name", "train_type"],
             dropna=False,
-            observed=False
+            observed=True
         )
         .agg(
             first_arrival_seconds=("arrival_seconds", "min"),
@@ -660,6 +647,9 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
         )
         .reset_index()
     )
+
+    del speed_df
+    gc.collect()
 
     run_summary["trip_duration_hr"] = (
         run_summary["last_departure_seconds"] - run_summary["first_arrival_seconds"]
@@ -677,7 +667,7 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
     run_summary = run_summary[run_summary["avg_speed_mph"].notna()]
 
     speed_stats = (
-        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=False)["avg_speed_mph"]
+        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=True)["avg_speed_mph"]
         .quantile([0, 0.25, 0.50, 0.75, 1.0])
         .unstack()
         .reset_index()
@@ -693,7 +683,7 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
     )
 
     run_counts = (
-        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=False)
+        run_summary.groupby(["train_name", "train_type"], dropna=False, observed=True)
         .size()
         .reset_index(name="train_runs")
     )
@@ -705,13 +695,7 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
     )
 
     st.subheader("Speed Percentile Table")
-
-    show_grid(
-        speed_stats.sort_values("p50_mph"),
-        key="speed_stats_table",
-        height=500,
-        page_size=100
-    )
+    safe_dataframe(speed_stats.sort_values("p50_mph"), max_rows=10000)
 
     st.subheader("Speed Boxplot")
 
@@ -733,9 +717,11 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
         st.info("No data for selected train names.")
         st.stop()
 
-    if len(box_df) > 50000:
-        st.warning("Boxplot has too many records. Showing first 50,000.")
-        box_df = box_df.head(50000)
+    MAX_BOXPLOT_ROWS = 30000
+
+    if len(box_df) > MAX_BOXPLOT_ROWS:
+        st.warning(f"Boxplot has too many records. Showing first {MAX_BOXPLOT_ROWS:,}.")
+        box_df = box_df.head(MAX_BOXPLOT_ROWS)
 
     fig = px.box(
         box_df,
@@ -759,10 +745,10 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
 
 
 # =====================================================
-# 4. AVERAGE CUMULATIVE DELAY BY DP
+# 4. CUMULATIVE DELAY BY DP AND TRAIN GROUP
 # =====================================================
-elif st.session_state.active_view == "Average Cumulative Delay by DP":
-    st.header("Average Cumulative Delay by DP")
+elif st.session_state.active_view == "Cumulative Delay by DP and Train Group":
+    st.header("Cumulative Delay by DP Location and Train Group")
 
     delay_basis = st.radio(
         "Delay basis",
@@ -779,9 +765,7 @@ elif st.session_state.active_view == "Average Cumulative Delay by DP":
     delay_df = base_df[
         [
             "train_label",
-            "train_name",
             "train_type",
-            "generated_train_id",
             "dp_id",
             "dp_name",
             "mileage",
@@ -793,14 +777,14 @@ elif st.session_state.active_view == "Average Cumulative Delay by DP":
     delay_df = delay_df.sort_values(["train_label", "arrival_seconds"])
 
     delay_df["cumulative_delay_min"] = (
-        delay_df.groupby("train_label", observed=False)[delay_col].cumsum()
+        delay_df.groupby("train_label", observed=True)[delay_col].cumsum()
     )
 
-    avg_delay = (
+    dp_group_delay = (
         delay_df.groupby(
-            ["train_name", "train_type", "dp_id", "dp_name", "mileage"],
+            ["train_type", "dp_id", "dp_name", "mileage"],
             dropna=False,
-            observed=False
+            observed=True
         )
         .agg(
             avg_cumulative_delay_min=("cumulative_delay_min", "mean"),
@@ -809,40 +793,23 @@ elif st.session_state.active_view == "Average Cumulative Delay by DP":
             train_runs=("train_label", "nunique"),
         )
         .reset_index()
-        .sort_values(["train_name", "mileage"])
+        .sort_values(["train_type", "mileage"])
     )
 
-    available_delay_names = sorted(avg_delay["train_name"].astype(str).dropna().unique())
+    del delay_df
+    gc.collect()
 
-    selected_delay_names = st.multiselect(
-        "Optional: filter train names in cumulative delay plot",
-        available_delay_names,
-        default=[],
-        help="Leave empty to show all train names."
-    )
+    st.subheader("Cumulative Delay Plot")
 
-    if selected_delay_names:
-        plot_delay = avg_delay[
-            avg_delay["train_name"].astype(str).isin(selected_delay_names)
-        ].copy()
-    else:
-        plot_delay = avg_delay.copy()
-
-    st.subheader("Average Cumulative Delay Plot")
-
-    if plot_delay.empty:
-        st.info("No delay data for selected train names.")
+    if dp_group_delay.empty:
+        st.info("No delay data available.")
         st.stop()
 
-    if len(plot_delay) > 50000:
-        st.warning("Plot has too many records. Showing first 50,000.")
-        plot_delay = plot_delay.head(50000)
-
     fig = px.line(
-        plot_delay,
+        dp_group_delay,
         x="mileage",
         y="avg_cumulative_delay_min",
-        color="train_name",
+        color="train_type",
         markers=True,
         hover_data=[
             "train_type",
@@ -854,11 +821,11 @@ elif st.session_state.active_view == "Average Cumulative Delay by DP":
             "max_cumulative_delay_min",
             "train_runs",
         ],
-        title="Average Cumulative Delay by DP",
+        title="Average Cumulative Delay by DP Location and Train Group",
         labels={
             "mileage": "Mileage",
             "avg_cumulative_delay_min": "Average Cumulative Delay (min)",
-            "train_name": "Train Name",
+            "train_type": "Train Group",
         },
     )
 
@@ -869,11 +836,5 @@ elif st.session_state.active_view == "Average Cumulative Delay by DP":
 
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Average Cumulative Delay Table")
-
-    show_grid(
-        avg_delay,
-        key="avg_cumulative_delay_table",
-        height=650,
-        page_size=100
-    )
+    st.subheader("Cumulative Delay Table")
+    safe_dataframe(dp_group_delay, max_rows=10000)
