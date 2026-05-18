@@ -226,7 +226,8 @@ def prepare_data(df_in):
 
     return data, delay_min_cols
 
-
+df = load_parquet(selected_file)
+st.success(f"Loaded: {selected_file.name}")
 df, delay_min_cols = prepare_data(df)
 
 
