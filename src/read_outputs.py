@@ -6,6 +6,7 @@ Created on Thu May 14 23:31:22 2026
 """
 from pathlib import Path
 import math
+import gc
 
 import pandas as pd
 import plotly.express as px
@@ -21,17 +22,32 @@ st.title("VIA Smart Network Dashboard")
 
 
 # =====================================================
-# FILE INPUT
+# PATHS
 # App is in repo/src/read_outputs.py
 # Parquet files are in repo/processed/
 # =====================================================
-DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
+DATA_DIR = Path(__file__).resolve().parents[1] / "processed"
 
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
 if not parquet_files:
     st.error(f"No parquet files found in: {DATA_DIR.resolve()}")
     st.stop()
+
+
+# =====================================================
+# SESSION STATE / MAIN MENU
+# =====================================================
+if "active_view" not in st.session_state:
+    st.session_state.active_view = "Main Menu"
+
+
+def clear_memory_and_go(view_name):
+    st.cache_data.clear()
+    gc.collect()
+    st.session_state.active_view = view_name
+    st.rerun()
+
 
 selected_file = st.sidebar.selectbox(
     "Select input parquet file",
@@ -41,6 +57,7 @@ selected_file = st.sidebar.selectbox(
 
 if st.sidebar.button("Clear cache and reload"):
     st.cache_data.clear()
+    gc.collect()
     st.rerun()
 
 
@@ -143,13 +160,10 @@ def normalize_bool_series(s):
 
 def prepare_data(df_in):
     """
-    Do not cache this, so Streamlit does not keep another big copy.
+    Not cached on purpose, so Streamlit does not keep another big copy.
     """
     data = df_in.copy()
 
-    # -----------------------------
-    # Numeric cleanup
-    # -----------------------------
     numeric_cols = [
         "datapoint_id",
         "generated_train_id",
@@ -170,10 +184,6 @@ def prepare_data(df_in):
         if col in data.columns:
             data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    # -----------------------------
-    # Safe string cleanup
-    # Fixes pyarrow/category string concat issue
-    # -----------------------------
     if "train_name" not in data.columns:
         data["train_name"] = ""
 
@@ -206,9 +216,6 @@ def prepare_data(df_in):
 
     data = data.drop(columns=["generated_train_id_str"])
 
-    # -----------------------------
-    # If total delay columns are missing, rebuild them
-    # -----------------------------
     delay_min_cols = sorted(
         [c for c in data.columns if c.startswith("delay_minutes_")],
         key=lambda x: int(x.split("_")[-1])
@@ -244,15 +251,9 @@ def prepare_data(df_in):
         else:
             data["total_delay_min_cn_filtered"] = 0.0
 
-    # -----------------------------
-    # Display time
-    # -----------------------------
     data["arrival_ddhhmmss"] = data["arrival_seconds"].apply(seconds_to_ddhhmmss)
     data["departure_ddhhmmss"] = data["departure_seconds"].apply(seconds_to_ddhhmmss)
 
-    # -----------------------------
-    # Reduce display memory
-    # -----------------------------
     for col in ["train_name", "train_type", "train_label", "dp_name"]:
         if col in data.columns:
             data[col] = data[col].astype("category")
@@ -260,23 +261,103 @@ def prepare_data(df_in):
     return data, delay_min_cols
 
 
-# =====================================================
-# LOAD DATA
-# =====================================================
-df = load_parquet(selected_file)
+def load_and_prepare():
+    df_loaded = load_parquet(selected_file)
 
-if df.empty:
-    st.error("Selected parquet file is empty.")
+    if df_loaded.empty:
+        st.error("Selected parquet file is empty.")
+        st.stop()
+
+    prepared, delay_cols = prepare_data(df_loaded)
+    return prepared, delay_cols
+
+
+def common_filters(df):
+    st.sidebar.header("Common Filters")
+
+    train_type_filter = st.sidebar.selectbox(
+        "Train group",
+        ["All", "Passenger", "Freight / Other", "Unknown"]
+    )
+
+    base_df = df
+
+    if train_type_filter != "All":
+        base_df = base_df[base_df["train_type"].astype(str) == train_type_filter]
+
+    train_names = sorted(base_df["train_name"].astype(str).dropna().unique())
+
+    selected_train_names = st.sidebar.multiselect(
+        "Optional: filter train name(s)",
+        train_names,
+        default=[],
+        help="Leave empty to include all trains."
+    )
+
+    if selected_train_names:
+        base_df = base_df[base_df["train_name"].astype(str).isin(selected_train_names)]
+
+    if base_df.empty:
+        st.warning("No data after filters.")
+        st.stop()
+
+    return base_df
+
+
+# =====================================================
+# MAIN MENU
+# =====================================================
+if st.session_state.active_view == "Main Menu":
+    st.subheader("Main Menu")
+    st.write("Choose an analysis view. Opening a view clears cached data first to reduce memory issues.")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.button(
+            "1. Stringline",
+            width="stretch",
+            on_click=clear_memory_and_go,
+            args=("Stringline",)
+        )
+
+        st.button(
+            "2. Train Performance Table",
+            width="stretch",
+            on_click=clear_memory_and_go,
+            args=("Train Performance Table",)
+        )
+
+    with c2:
+        st.button(
+            "3. Speed Distribution by Train Name",
+            width="stretch",
+            on_click=clear_memory_and_go,
+            args=("Speed Distribution by Train Name",)
+        )
+
+        st.button(
+            "4. Average Cumulative Delay by DP",
+            width="stretch",
+            on_click=clear_memory_and_go,
+            args=("Average Cumulative Delay by DP",)
+        )
+
     st.stop()
 
-df, delay_min_cols = prepare_data(df)
+
+# =====================================================
+# VIEW HEADER + BACK BUTTON
+# =====================================================
+if st.button("Back to Main Menu / Clear Memory", width="stretch"):
+    clear_memory_and_go("Main Menu")
+
+st.divider()
+
+df, delay_min_cols = load_and_prepare()
 
 st.success(f"Loaded: {selected_file.name}")
 
-
-# =====================================================
-# TOP METRICS
-# =====================================================
 c1, c2, c3, c4, c5 = st.columns(5)
 
 c1.metric("Rows", f"{len(df):,}")
@@ -295,63 +376,17 @@ with st.expander("Debug / file info"):
     st.write("Arrival hour min:", float(df["arrival_hour"].min()))
     st.write("Arrival hour max:", float(df["arrival_hour"].max()))
 
-
-# =====================================================
-# VIEW SELECTOR
-# =====================================================
-view = st.sidebar.radio(
-    "Select view",
-    [
-        "1. Stringline",
-        "2. Train Performance Table",
-        "3. Speed Distribution by Train Name",
-        "4. Average Cumulative Delay by DP",
-    ]
-)
-
-
-# =====================================================
-# COMMON FILTERS
-# Defaults to all trains.
-# Filters only apply if user selects something.
-# =====================================================
-st.sidebar.header("Common Filters")
-
-train_type_filter = st.sidebar.selectbox(
-    "Train group",
-    ["All", "Passenger", "Freight / Other", "Unknown"]
-)
-
-base_df = df
-
-if train_type_filter != "All":
-    base_df = base_df[base_df["train_type"].astype(str) == train_type_filter]
-
-train_names = sorted(base_df["train_name"].astype(str).dropna().unique())
-
-selected_train_names = st.sidebar.multiselect(
-    "Optional: filter train name(s)",
-    train_names,
-    default=[],
-    help="Leave empty to include all trains."
-)
-
-if selected_train_names:
-    base_df = base_df[base_df["train_name"].astype(str).isin(selected_train_names)]
-
-if base_df.empty:
-    st.warning("No data after filters.")
-    st.stop()
+base_df = common_filters(df)
 
 
 # =====================================================
 # 1. STRINGLINE
 # =====================================================
-if view == "1. Stringline":
+if st.session_state.active_view == "Stringline":
     st.header("Stringline")
 
     st.caption(
-        "Fixed 24-hour window. Move the slider below to scroll through the simulation."
+        "Passenger and freight are differentiated by line color. Each train run is drawn as its own line."
     )
 
     stringline_df = base_df[
@@ -393,6 +428,17 @@ if view == "1. Stringline":
 
     if slider_max <= slider_min:
         slider_max = slider_min + 1
+
+    start_hour_default = slider_min
+    end_hour_default = start_hour_default + WINDOW_HOURS
+
+    chart_df = stringline_df[
+        (stringline_df["arrival_hour"] >= start_hour_default)
+        & (stringline_df["arrival_hour"] <= end_hour_default)
+    ].copy()
+
+    # Placeholder lets the chart appear above the slider while the slider value still controls the chart.
+    chart_placeholder = st.empty()
 
     start_hour = st.slider(
         "Move 24-hour window start time",
@@ -438,15 +484,17 @@ if view == "1. Stringline":
         chart_df = chart_df.head(MAX_CHART_ROWS)
 
     if chart_df.empty:
-        st.info("No trains in this 24-hour window.")
+        chart_placeholder.info("No trains in this 24-hour window.")
         st.stop()
 
     fig = px.line(
         chart_df,
         x="arrival_hour",
         y="mileage",
-        color="train_label",
+        color="train_type",
+        line_group="train_label",
         markers=False,
+        hover_name="train_label",
         hover_data=[
             "train_name",
             "train_type",
@@ -462,12 +510,11 @@ if view == "1. Stringline":
         labels={
             "arrival_hour": "Simulation Time (hours)",
             "mileage": "Mileage",
-            "train_label": "Train Run",
+            "train_type": "Train Group",
         },
         title="Stringline by Mileage"
     )
 
-    # Force full corridor mileage range
     full_min_mile = float(df["mileage"].min())
     full_max_mile = float(df["mileage"].max())
 
@@ -485,10 +532,10 @@ if view == "1. Stringline":
     fig.update_layout(
         height=760,
         hovermode="closest",
-        legend_title_text="Train Run",
+        legend_title_text="Train Group",
     )
 
-    st.plotly_chart(fig, width="stretch")
+    chart_placeholder.plotly_chart(fig, width="stretch")
 
     with st.expander("Filtered stringline data"):
         st.dataframe(
@@ -514,7 +561,7 @@ if view == "1. Stringline":
 # =====================================================
 # 2. TRAIN PERFORMANCE TABLE
 # =====================================================
-elif view == "2. Train Performance Table":
+elif st.session_state.active_view == "Train Performance Table":
     st.header("Train Performance Table")
 
     delay_basis = st.radio(
@@ -596,7 +643,7 @@ elif view == "2. Train Performance Table":
 # =====================================================
 # 3. SPEED DISTRIBUTION BY TRAIN NAME
 # =====================================================
-elif view == "3. Speed Distribution by Train Name":
+elif st.session_state.active_view == "Speed Distribution by Train Name":
     st.header("Speed Distribution by Train Name")
 
     run_summary = (
@@ -671,12 +718,16 @@ elif view == "3. Speed Distribution by Train Name":
     available_names = sorted(run_summary["train_name"].astype(str).dropna().unique())
 
     plot_names = st.multiselect(
-        "Train names to include in boxplot",
+        "Optional: filter train names in boxplot",
         available_names,
-        default=available_names[:20]
+        default=[],
+        help="Leave empty to show all train names."
     )
 
-    box_df = run_summary[run_summary["train_name"].astype(str).isin(plot_names)]
+    if plot_names:
+        box_df = run_summary[run_summary["train_name"].astype(str).isin(plot_names)]
+    else:
+        box_df = run_summary
 
     if box_df.empty:
         st.info("No data for selected train names.")
@@ -710,7 +761,7 @@ elif view == "3. Speed Distribution by Train Name":
 # =====================================================
 # 4. AVERAGE CUMULATIVE DELAY BY DP
 # =====================================================
-elif view == "4. Average Cumulative Delay by DP":
+elif st.session_state.active_view == "Average Cumulative Delay by DP":
     st.header("Average Cumulative Delay by DP")
 
     delay_basis = st.radio(
@@ -764,14 +815,18 @@ elif view == "4. Average Cumulative Delay by DP":
     available_delay_names = sorted(avg_delay["train_name"].astype(str).dropna().unique())
 
     selected_delay_names = st.multiselect(
-        "Select train names for cumulative delay plot",
+        "Optional: filter train names in cumulative delay plot",
         available_delay_names,
-        default=available_delay_names[:10]
+        default=[],
+        help="Leave empty to show all train names."
     )
 
-    plot_delay = avg_delay[
-        avg_delay["train_name"].astype(str).isin(selected_delay_names)
-    ].copy()
+    if selected_delay_names:
+        plot_delay = avg_delay[
+            avg_delay["train_name"].astype(str).isin(selected_delay_names)
+        ].copy()
+    else:
+        plot_delay = avg_delay.copy()
 
     st.subheader("Average Cumulative Delay Plot")
 
