@@ -19,7 +19,6 @@ from yaml.loader import SafeLoader
 
 # =====================================================
 # PAGE SETUP
-# Must be before other Streamlit commands
 # =====================================================
 st.set_page_config(layout="wide")
 st.title("VIA Smart Network Dashboard")
@@ -27,10 +26,6 @@ st.title("VIA Smart Network Dashboard")
 
 # =====================================================
 # AUTHENTICATION
-# repo/
-# └── src/
-#     ├── read_outputs.py
-#     └── config.yaml
 # =====================================================
 CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
@@ -112,9 +107,6 @@ if st.sidebar.button("Clear cache and reload"):
 # =====================================================
 @st.cache_data(show_spinner=True, max_entries=1)
 def load_parquet(path):
-    """
-    Load only dashboard-needed columns.
-    """
     import pyarrow.parquet as pq
 
     schema_cols = pq.read_schema(path).names
@@ -155,13 +147,10 @@ def seconds_to_ddhhmmss(seconds):
         return ""
 
     seconds = int(seconds)
-
     d = seconds // 86400
     seconds %= 86400
-
     h = seconds // 3600
     seconds %= 3600
-
     m = seconds // 60
     s = seconds % 60
 
@@ -184,9 +173,6 @@ def safe_dataframe(df, max_rows=5000):
 
 
 def prepare_data(df_in):
-    """
-    Do not cache this to avoid duplicate cached dataframe copies.
-    """
     data = df_in.copy()
 
     numeric_cols = [
@@ -276,8 +262,6 @@ def prepare_data(df_in):
         else:
             data["total_delay_min_cn_filtered"] = 0.0
 
-    # Flag records with impossible/incomplete dispatch output.
-    # These are excluded from all operational analyses.
     data["never_dispatched_record"] = (
         (data["departure_seconds"] == 0)
         & (data["arrival_seconds"] > 0)
@@ -340,11 +324,6 @@ def common_filters(df):
 # TPC HELPERS
 # =====================================================
 def make_two_point_stringline_rows(df, time_prefix):
-    """
-    Convert each DP record into two plotting points:
-    arrival and departure at the same mileage.
-    This makes dwell appear as a vertical segment at the DP location.
-    """
     rows = []
 
     for _, r in df.iterrows():
@@ -391,16 +370,6 @@ def make_two_point_stringline_rows(df, time_prefix):
 
 
 def build_tpc_profile_for_train_name(data, selected_train_name):
-    """
-    Build TPC/base profile for one train_name.
-
-    Logic:
-    1. Pick the most complete train_label as the route template.
-    2. For each DP, use minimum non-negative dwell time.
-    3. For each consecutive DP pair, use minimum observed link time:
-       downstream arrival - upstream departure.
-    4. Rebuild a synthetic minimum-time stringline starting at time zero.
-    """
     tn = data[
         (data["train_name"].astype(str) == selected_train_name)
         & (data["arrival_seconds"].notna())
@@ -419,7 +388,6 @@ def build_tpc_profile_for_train_name(data, selected_train_name):
     if tn.empty:
         return pd.DataFrame(), pd.DataFrame(), None, pd.DataFrame()
 
-    # Pick most complete train run as the route template.
     route_label = (
         tn.groupby("train_label", observed=True)
         .size()
@@ -441,7 +409,6 @@ def build_tpc_profile_for_train_name(data, selected_train_name):
     if len(route) < 2:
         return pd.DataFrame(), pd.DataFrame(), route_label, pd.DataFrame()
 
-    # Minimum dwell by DP.
     dwell_source = tn[
         tn["dwell_minutes"].notna()
         & (tn["dwell_minutes"] >= 0)
@@ -453,7 +420,6 @@ def build_tpc_profile_for_train_name(data, selected_train_name):
         .to_dict()
     )
 
-    # Segment/link time from all repeated runs of this train_name.
     tn = tn.sort_values(["train_label", "arrival_seconds"]).copy()
 
     tn["next_dp_id"] = tn.groupby("train_label", observed=True)["dp_id"].shift(-1)
@@ -489,8 +455,9 @@ def build_tpc_profile_for_train_name(data, selected_train_name):
     )
 
     segment_table["min_link_minutes"] = segment_table["min_link_seconds"] / 60
+    segment_table["p50_link_minutes"] = segment_table["p50_link_seconds"] / 60
+    segment_table["max_link_minutes"] = segment_table["max_link_seconds"] / 60
 
-    # Rebuild TPC profile.
     tpc_rows = []
     current_time = 0.0
 
@@ -539,7 +506,6 @@ def build_tpc_profile_for_train_name(data, selected_train_name):
             link_sec = min_link_by_pair.get((dp_id, next_dp_id), None)
 
             if link_sec is None:
-                # Fallback to template train's actual link time.
                 link_sec = float(next_r["arrival_seconds"] - r["departure_seconds"])
 
             if pd.isna(link_sec) or link_sec < 0:
@@ -702,10 +668,7 @@ st.divider()
 
 df, delay_min_cols = load_and_prepare()
 
-# Keep a separate bad-record dataframe for the new view.
 never_dispatched_df = df[df["never_dispatched_record"]].copy()
-
-# Exclude bad records from all normal analyses.
 analysis_df = df[~df["never_dispatched_record"]].copy()
 
 st.success(f"Loaded: {selected_file.name}")
@@ -730,8 +693,6 @@ with st.expander("Debug / file info"):
     st.write("Arrival hour max:", float(analysis_df["arrival_hour"].max()) if not analysis_df.empty else None)
     st.write("Excluded condition: departure_seconds == 0 and arrival_seconds > 0")
 
-# TPC page uses the full valid analysis_df.
-# Other pages can use common sidebar filters.
 if st.session_state.active_view == "TPC/Base Run Comparison":
     base_df = analysis_df
 else:
@@ -1472,17 +1433,30 @@ elif st.session_state.active_view == "TPC/Base Run Comparison":
 
     st.write(f"TPC route template used: `{route_template_label}`")
 
-    left, right = st.columns(2)
+    # Zoom to actual selected train/TPC mileage range only
+    plot_min_mile = min(
+        float(tpc_df["mileage"].min()),
+        float(actual_plot["mileage"].min())
+    )
 
-    full_min_mile = float(tpc_source["mileage"].min())
-    full_max_mile = float(tpc_source["mileage"].max())
+    plot_max_mile = max(
+        float(tpc_df["mileage"].max()),
+        float(actual_plot["mileage"].max())
+    )
+
+    mile_padding = max((plot_max_mile - plot_min_mile) * 0.03, 0.5)
+
+    plot_min_mile = plot_min_mile - mile_padding
+    plot_max_mile = plot_max_mile + mile_padding
+
+    left, right = st.columns(2)
 
     with left:
         st.subheader("TPC/Base Stringline")
         fig_tpc = plot_tpc_only(tpc_df, selected_train_name)
 
         fig_tpc.update_yaxes(
-            range=[full_min_mile, full_max_mile],
+            range=[plot_min_mile, plot_max_mile],
             title="Mileage"
         )
 
@@ -1497,7 +1471,7 @@ elif st.session_state.active_view == "TPC/Base Run Comparison":
         )
 
         fig_compare.update_yaxes(
-            range=[full_min_mile, full_max_mile],
+            range=[plot_min_mile, plot_max_mile],
             title="Mileage"
         )
 
@@ -1531,8 +1505,8 @@ elif st.session_state.active_view == "TPC/Base Run Comparison":
                         "next_dp_id",
                         "next_dp_name",
                         "min_link_minutes",
-                        "p50_link_seconds",
-                        "max_link_seconds",
+                        "p50_link_minutes",
+                        "max_link_minutes",
                         "observed_runs",
                     ]
                 ],
