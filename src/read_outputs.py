@@ -279,7 +279,7 @@ def build_dp_axis_labels_for_stringline(chart_df, max_labels=55):
 def add_stringline_end_labels(
     fig,
     chart_df,
-    only_passenger=True,
+    only_passenger=False,
     max_labels=100,
 ):
     """
