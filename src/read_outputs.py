@@ -72,6 +72,44 @@ elif st.session_state.get("authentication_status"):
 # =====================================================
 DATA_DIR = Path(__file__).resolve().parents[1] / "inputs"
 
+
+# =====================================================
+# STRINGLINE STYLE SETTINGS
+# =====================================================
+FIXED_TRAIN_TYPE_COLORS = {
+    "P": "#d62728",   # red - passenger
+    "Z": "#1f77b4",   # blue
+    "L": "#2ca02c",   # green
+    "M": "#9467bd",   # purple
+    "Q": "#ff7f0e",   # orange
+    "B": "#17becf",   # cyan
+    "A": "#8c564b",   # brown
+    "X": "#e377c2",   # pink
+    "G": "#7f7f7f",   # gray
+    "C": "#bcbd22",   # olive
+    "S": "#003f5c",   # dark blue
+    "T": "#ffa600",   # gold
+    "E": "#3366cc",   # blue fallback
+    "Unknown": "#000000",
+}
+
+FALLBACK_TRAIN_TYPE_COLORS = [
+    "#3366cc",
+    "#109618",
+    "#990099",
+    "#0099c6",
+    "#dd4477",
+    "#66aa00",
+    "#b82e2e",
+    "#316395",
+    "#994499",
+    "#22aa99",
+]
+
+LABEL_ALL_TRAINS_WHEN_TRAIN_COUNT_LESS_THAN = 60
+MAX_STRINGLINE_LABELS = 100
+MAX_Y_AXIS_DP_LABELS = 55
+
 parquet_files = sorted(DATA_DIR.glob("*.parquet"))
 
 if not parquet_files:
@@ -170,6 +208,141 @@ def normalize_bool_series(s):
 def safe_dataframe(df, max_rows=5000):
     st.caption(f"Showing first {min(len(df), max_rows):,} rows out of {len(df):,}.")
     st.dataframe(df.head(max_rows), width="stretch")
+
+
+
+def get_train_type_code_from_name(train_name):
+    """
+    Train type code = first letter of train_name.
+    Example: P033A -> P, Z121 -> Z, L585 -> L
+    """
+    if pd.isna(train_name):
+        return "Unknown"
+
+    x = str(train_name).strip()
+
+    if x == "":
+        return "Unknown"
+
+    return x[0].upper()
+
+
+def build_stringline_color_map(train_type_codes):
+    """
+    Build one fixed color map. P is always red.
+    """
+    color_map = {}
+    fallback_i = 0
+
+    for code in sorted(train_type_codes):
+        code = str(code)
+
+        if code in FIXED_TRAIN_TYPE_COLORS:
+            color_map[code] = FIXED_TRAIN_TYPE_COLORS[code]
+        else:
+            color_map[code] = FALLBACK_TRAIN_TYPE_COLORS[
+                fallback_i % len(FALLBACK_TRAIN_TYPE_COLORS)
+            ]
+            fallback_i += 1
+
+    if "P" in train_type_codes:
+        color_map["P"] = "#d62728"
+
+    return color_map
+
+
+def build_dp_axis_labels_for_stringline(chart_df, max_labels=55):
+    """
+    Plot by mileage, but show dp_name on y-axis.
+    """
+    label_df = (
+        chart_df[["mileage", "dp_name"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values("mileage")
+    )
+
+    if label_df.empty:
+        return [], []
+
+    if len(label_df) > max_labels:
+        step = math.ceil(len(label_df) / max_labels)
+        label_df = label_df.iloc[::step].copy()
+
+    tickvals = label_df["mileage"].tolist()
+    ticktext = label_df["dp_name"].astype(str).tolist()
+
+    return tickvals, ticktext
+
+
+def add_stringline_end_labels(
+    fig,
+    chart_df,
+    only_passenger=True,
+    max_labels=100,
+):
+    """
+    Add train labels near the end of each line.
+    For dense pages, label passenger trains only.
+    """
+    label_rows = []
+
+    for train_label, g in chart_df.groupby("train_label", observed=True):
+        g = g.sort_values("arrival_hour")
+
+        if g.empty:
+            continue
+
+        train_name = str(g["train_name"].iloc[0])
+        short_name = train_name.split("-")[0]
+        train_type_code = str(g["train_type_code"].iloc[0])
+
+        if only_passenger and train_type_code != "P":
+            continue
+
+        last = g.iloc[-1]
+
+        label_rows.append(
+            {
+                "label": short_name,
+                "x": float(last["arrival_hour"]),
+                "y": float(last["mileage"]),
+                "train_type_code": train_type_code,
+            }
+        )
+
+    if not label_rows:
+        return fig
+
+    label_df = pd.DataFrame(label_rows)
+    label_df = label_df.sort_values(["x", "y"]).head(max_labels)
+
+    annotations = []
+
+    for _, r in label_df.iterrows():
+        is_passenger = str(r["train_type_code"]) == "P"
+
+        annotations.append(
+            dict(
+                x=r["x"] + 0.05,
+                y=r["y"],
+                text=str(r["label"]),
+                showarrow=False,
+                xanchor="left",
+                yanchor="middle",
+                font=dict(
+                    size=10,
+                    color="red" if is_passenger else "black",
+                ),
+                bgcolor="rgba(255,255,255,0.65)",
+                bordercolor="rgba(255,255,255,0)",
+                borderpad=1,
+            )
+        )
+
+    fig.update_layout(annotations=annotations)
+
+    return fig
 
 
 def prepare_data(df_in):
@@ -706,18 +879,23 @@ if st.session_state.active_view == "Stringline":
     st.header("Stringline")
 
     st.caption(
-        "Passenger and freight are differentiated by color. Each train run is drawn as its own line. "
-        "Records with departure_seconds = 0 and arrival_seconds > 0 are excluded."
+        "Stringline uses the current 24-hour window. "
+        "Mileage is used for plotting, DP names are shown on the y-axis, "
+        "and train colors use the first letter of train_name. Passenger trains are red."
     )
 
     stringline_df = base_df[
         base_df["mileage"].notna()
         & base_df["arrival_hour"].notna()
-    ]
+    ].copy()
 
     if stringline_df.empty:
         st.info("No stringline data available.")
         st.stop()
+
+    stringline_df["train_type_code"] = stringline_df["train_name"].apply(
+        get_train_type_code_from_name
+    )
 
     train_labels = sorted(stringline_df["train_label"].astype(str).dropna().unique())
 
@@ -731,7 +909,7 @@ if st.session_state.active_view == "Stringline":
     if selected_train_labels:
         stringline_df = stringline_df[
             stringline_df["train_label"].astype(str).isin(selected_train_labels)
-        ]
+        ].copy()
 
     if stringline_df.empty:
         st.info("No train runs selected.")
@@ -785,7 +963,7 @@ if st.session_state.active_view == "Stringline":
             f"{chart_df['mileage'].min():.1f} to {chart_df['mileage'].max():.1f}"
         )
 
-    MAX_CHART_ROWS = 20000
+    MAX_CHART_ROWS = 25000
 
     if len(chart_df) > MAX_CHART_ROWS:
         st.warning(
@@ -793,58 +971,141 @@ if st.session_state.active_view == "Stringline":
             f"Showing first {MAX_CHART_ROWS:,}. "
             "Use train group, train name, or train run filters if needed."
         )
-        chart_df = chart_df.head(MAX_CHART_ROWS)
+        chart_df = chart_df.head(MAX_CHART_ROWS).copy()
 
     if chart_df.empty:
         chart_placeholder.info("No trains in this 24-hour window.")
         st.stop()
 
-    fig = px.line(
+    train_type_codes = sorted(chart_df["train_type_code"].dropna().unique())
+    color_map = build_stringline_color_map(train_type_codes)
+
+    fig = go.Figure()
+
+    shown_legend_codes = set()
+
+    # Draw one trace per train_label, but one legend item per first-letter train type.
+    for train_label, g in chart_df.groupby("train_label", observed=True):
+        g = g.sort_values("arrival_hour")
+
+        if g.empty:
+            continue
+
+        train_type_code = str(g["train_type_code"].iloc[0])
+        color = color_map.get(train_type_code, "#000000")
+
+        show_legend = train_type_code not in shown_legend_codes
+        shown_legend_codes.add(train_type_code)
+
+        fig.add_trace(
+            go.Scattergl(
+                x=g["arrival_hour"],
+                y=g["mileage"],
+                mode="lines",
+                line=dict(
+                    color=color,
+                    width=1.4,
+                ),
+                opacity=0.82,
+                name=train_type_code,
+                legendgroup=train_type_code,
+                showlegend=show_legend,
+                customdata=g[
+                    [
+                        "train_label",
+                        "train_name",
+                        "dp_name",
+                        "dp_id",
+                        "arrival_ddhhmmss",
+                        "departure_ddhhmmss",
+                        "dwell_minutes",
+                        "total_delay_min_all_codes",
+                        "total_delay_min_cn_filtered",
+                    ]
+                ],
+                hovertemplate=(
+                    "Train label: %{customdata[0]}<br>"
+                    "Train name: %{customdata[1]}<br>"
+                    "Type code: " + train_type_code + "<br>"
+                    "DP: %{customdata[2]}<br>"
+                    "DP ID: %{customdata[3]}<br>"
+                    "Mileage: %{y:.2f}<br>"
+                    "Hour: %{x:.2f}<br>"
+                    "Arrival: %{customdata[4]}<br>"
+                    "Departure: %{customdata[5]}<br>"
+                    "Dwell min: %{customdata[6]:.2f}<br>"
+                    "Delay min all: %{customdata[7]:.2f}<br>"
+                    "Delay min CN-filtered: %{customdata[8]:.2f}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    tickvals, ticktext = build_dp_axis_labels_for_stringline(
         chart_df,
-        x="arrival_hour",
-        y="mileage",
-        color="train_type",
-        line_group="train_label",
-        markers=False,
-        hover_name="train_label",
-        hover_data=[
-            "train_name",
-            "train_type",
-            "dp_name",
-            "dp_id",
-            "mileage",
-            "arrival_ddhhmmss",
-            "departure_ddhhmmss",
-            "dwell_minutes",
-            "total_delay_min_all_codes",
-            "total_delay_min_cn_filtered",
-        ],
-        labels={
-            "arrival_hour": "Simulation Time (hours)",
-            "mileage": "Mileage",
-            "train_type": "Train Group",
-        },
-        title="Stringline by Mileage"
+        max_labels=MAX_Y_AXIS_DP_LABELS,
     )
 
-    full_min_mile = float(analysis_df["mileage"].min())
-    full_max_mile = float(analysis_df["mileage"].max())
+    plot_min_mile = float(chart_df["mileage"].min())
+    plot_max_mile = float(chart_df["mileage"].max())
+    mile_padding = max((plot_max_mile - plot_min_mile) * 0.03, 0.5)
 
-    fig.update_yaxes(
-        range=[full_min_mile, full_max_mile],
-        title="Mileage"
+    train_count = chart_df["train_label"].nunique()
+    passenger_count = chart_df[
+        chart_df["train_type_code"].astype(str).eq("P")
+    ]["train_label"].nunique()
+
+    other_count = train_count - passenger_count
+
+    only_passenger_labels = (
+        train_count > LABEL_ALL_TRAINS_WHEN_TRAIN_COUNT_LESS_THAN
+    )
+
+    fig = add_stringline_end_labels(
+        fig=fig,
+        chart_df=chart_df,
+        only_passenger=only_passenger_labels,
+        max_labels=MAX_STRINGLINE_LABELS,
+    )
+
+    label_note = (
+        "passenger labels only"
+        if only_passenger_labels
+        else "all train labels"
     )
 
     fig.update_xaxes(
         range=[start_hour, end_hour],
         dtick=2,
-        title="Simulation Time (hours)"
+        title="Simulation Time (hours)",
+        showgrid=True,
+        gridwidth=0.5,
+        gridcolor="rgba(180,180,180,0.35)",
+    )
+
+    fig.update_yaxes(
+        range=[plot_min_mile - mile_padding, plot_max_mile + mile_padding],
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=ticktext,
+        title="DP Name shown on axis; plotted by mileage",
+        showgrid=True,
+        gridwidth=0.5,
+        gridcolor="rgba(180,180,180,0.35)",
     )
 
     fig.update_layout(
-        height=760,
+        title=(
+            f"Stringline: Hour {start_hour:.0f}-{end_hour:.0f} "
+            f"(Day {start_hour / 24:.0f} to {end_hour / 24:.0f})<br>"
+            f"Train runs: {train_count:,} "
+            f"(Passenger: {passenger_count:,}, Other: {other_count:,}) | {label_note}"
+        ),
+        height=820,
         hovermode="closest",
-        legend_title_text="Train Group",
+        legend_title_text="Train type<br>(first letter)",
+        margin=dict(l=160, r=40, t=90, b=60),
+        plot_bgcolor="white",
     )
 
     chart_placeholder.plotly_chart(fig, width="stretch")
@@ -855,6 +1116,7 @@ if st.session_state.active_view == "Stringline":
                 [
                     "train_label",
                     "train_name",
+                    "train_type_code",
                     "train_type",
                     "dp_name",
                     "dp_id",
