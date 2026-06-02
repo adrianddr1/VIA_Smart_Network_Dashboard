@@ -107,7 +107,7 @@ FALLBACK_TRAIN_TYPE_COLORS = [
     "#22aa99",
 ]
 
-LABEL_ALL_TRAINS_WHEN_TRAIN_COUNT_LESS_THAN = 60
+
 MAX_STRINGLINE_LABELS = 100
 MAX_Y_AXIS_DP_LABELS = 55
 
@@ -1063,9 +1063,7 @@ if st.session_state.active_view == "Stringline":
 
     other_count = train_count - passenger_count
 
-    only_passenger_labels = (
-        train_count > LABEL_ALL_TRAINS_WHEN_TRAIN_COUNT_LESS_THAN
-    )
+    only_passenger_labels = False
 
     fig = add_stringline_end_labels(
         fig=fig,
@@ -1913,7 +1911,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
 
     sort_choice = st.radio(
         "Sort freight train names",
-        ["By median time", "By first letter / train name"],
+        ["By median time", "By first letter / train type"],
         horizontal=True,
         help=(
             "This sorting option only changes Freight / Other charts. "
@@ -2003,7 +2001,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
 
         fig.update_xaxes(
             tickangle=-60,
-            title="Train name before first '-'",
+            title="Train symbols",
             showgrid=True,
             gridwidth=0.4,
             gridcolor="rgba(255,255,255,0.15)",
