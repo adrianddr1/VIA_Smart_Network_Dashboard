@@ -1355,7 +1355,6 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
 
     st.plotly_chart(fig, width="stretch")
 
-
 # =====================================================
 # 4. AVERAGE DELAY BY SEGMENT AND TRAIN GROUP
 # =====================================================
@@ -1364,290 +1363,344 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
 
     st.caption(
         "This view uses only total_delay_min_cn_filtered. "
-        "Delay is assigned to the segment from the previous DP to the current DP. "
-        "EB and WB are separated based on mileage movement: EB = MP decreases, WB = MP increases. "
-        "Very large placeholder/outlier delays are excluded."
+        "Delay is assigned to the segment from previous DP to current DP. "
+        "EB means mileage decreases; WB means mileage increases."
     )
 
-    delay_col = "total_delay_min_cn_filtered"
+    OUTLIER_DELAY_LIMIT = st.number_input(
+        "Exclude delay records greater than this many minutes",
+        min_value=1,
+        max_value=2_000_000,
+        value=1_000_000,
+        step=1000,
+        help="This removes placeholder values such as D999H99M99 that become very large numeric delays."
+    )
 
-    if delay_col not in base_df.columns:
-        st.error("total_delay_min_cn_filtered is not available in the selected parquet file.")
+    needed_cols = [
+        "train_label",
+        "train_name",
+        "dp_id",
+        "dp_name",
+        "mileage",
+        "arrival_seconds",
+        "total_delay_min_cn_filtered",
+    ]
+
+    missing_cols = [c for c in needed_cols if c not in base_df.columns]
+
+    if missing_cols:
+        st.error(f"Missing required columns: {missing_cols}")
         st.stop()
 
-    outlier_threshold_min = st.number_input(
-        "Exclude delay values greater than this many minutes",
-        min_value=1.0,
-        max_value=2_000_000.0,
-        value=1_000_000.0,
-        step=1000.0,
-        help="This removes placeholder values such as D999H99M99 / 1,438,560-minute delays."
-    )
+    seg_df = base_df[needed_cols].copy()
 
-    segment_source = base_df[
-        [
-            "train_label",
-            "train_name",
-            "train_type",
-            "dp_id",
-            "dp_name",
-            "mileage",
-            "arrival_seconds",
-            delay_col,
-        ]
+    seg_df["mileage"] = pd.to_numeric(seg_df["mileage"], errors="coerce")
+    seg_df["arrival_seconds"] = pd.to_numeric(seg_df["arrival_seconds"], errors="coerce")
+    seg_df["total_delay_min_cn_filtered"] = pd.to_numeric(
+        seg_df["total_delay_min_cn_filtered"],
+        errors="coerce"
+    ).fillna(0)
+
+    # Remove bad / placeholder delay values
+    seg_df = seg_df[
+        seg_df["mileage"].notna()
+        & seg_df["arrival_seconds"].notna()
+        & seg_df["total_delay_min_cn_filtered"].notna()
+        & (seg_df["total_delay_min_cn_filtered"] >= 0)
+        & (seg_df["total_delay_min_cn_filtered"] <= OUTLIER_DELAY_LIMIT)
     ].copy()
 
-    # Keep only usable rows and force numeric delay.
-    segment_source[delay_col] = pd.to_numeric(segment_source[delay_col], errors="coerce")
-    segment_source["mileage"] = pd.to_numeric(segment_source["mileage"], errors="coerce")
-    segment_source["arrival_seconds"] = pd.to_numeric(segment_source["arrival_seconds"], errors="coerce")
+    if seg_df.empty:
+        st.info("No valid segment delay data after filtering.")
+        st.stop()
 
-    rows_before = len(segment_source)
-
-    segment_source = segment_source[
-        segment_source["train_label"].notna()
-        & segment_source["dp_name"].notna()
-        & segment_source["mileage"].notna()
-        & segment_source["arrival_seconds"].notna()
-        & segment_source[delay_col].notna()
-    ].copy()
-
-    # Exclude invalid and placeholder delay values.
-    invalid_delay_mask = (
-        (segment_source[delay_col] < 0)
-        | (segment_source[delay_col] > outlier_threshold_min)
+    # Passenger / Freight grouping
+    seg_df["train_group"] = seg_df["train_name"].astype(str).str.startswith("P").map(
+        {True: "Passenger", False: "Freight / Other"}
     )
 
-    excluded_delay_rows = int(invalid_delay_mask.sum())
-    excluded_delay_minutes = float(segment_source.loc[invalid_delay_mask, delay_col].sum())
+    # Sort each train run by time, then create previous DP fields
+    seg_df = seg_df.sort_values(["train_label", "arrival_seconds"]).copy()
 
-    segment_source = segment_source[~invalid_delay_mask].copy()
+    seg_df["prev_dp_id"] = seg_df.groupby("train_label", observed=True)["dp_id"].shift(1)
+    seg_df["prev_dp_name"] = seg_df.groupby("train_label", observed=True)["dp_name"].shift(1)
+    seg_df["prev_mileage"] = seg_df.groupby("train_label", observed=True)["mileage"].shift(1)
 
-    # Sort each train run and create previous-DP fields.
-    segment_source = segment_source.sort_values(["train_label", "arrival_seconds", "mileage"]).copy()
-
-    segment_source["from_dp_id"] = segment_source.groupby("train_label", observed=True)["dp_id"].shift(1)
-    segment_source["from_dp_name"] = segment_source.groupby("train_label", observed=True)["dp_name"].shift(1)
-    segment_source["from_mileage"] = segment_source.groupby("train_label", observed=True)["mileage"].shift(1)
-    segment_source["from_arrival_seconds"] = segment_source.groupby("train_label", observed=True)["arrival_seconds"].shift(1)
-
-    segment_source = segment_source.rename(
-        columns={
-            "dp_id": "to_dp_id",
-            "dp_name": "to_dp_name",
-            "mileage": "to_mileage",
-            "arrival_seconds": "to_arrival_seconds",
-            delay_col: "segment_delay_min",
-        }
-    )
-
-    segment_source = segment_source[
-        segment_source["from_dp_name"].notna()
-        & segment_source["from_mileage"].notna()
+    # Keep only real movement segments
+    seg_df = seg_df[
+        seg_df["prev_dp_id"].notna()
+        & seg_df["prev_dp_name"].notna()
+        & seg_df["prev_mileage"].notna()
+        & (seg_df["mileage"] != seg_df["prev_mileage"])
     ].copy()
 
-    segment_source["mp_change"] = segment_source["to_mileage"] - segment_source["from_mileage"]
+    if seg_df.empty:
+        st.info("No valid previous-DP/current-DP segment records.")
+        st.stop()
 
-    # EB = MP decreases. WB = MP increases.
-    segment_source["direction"] = pd.NA
-    segment_source.loc[segment_source["mp_change"] < 0, "direction"] = "EB"
-    segment_source.loc[segment_source["mp_change"] > 0, "direction"] = "WB"
+    # Direction based on MP movement
+    seg_df["direction"] = seg_df.apply(
+        lambda r: "EB" if r["mileage"] < r["prev_mileage"] else "WB",
+        axis=1
+    )
 
-    # Remove zero-mile duplicate/non-movement rows.
-    zero_or_unknown_direction_rows = int(segment_source["direction"].isna().sum())
-    segment_source = segment_source[segment_source["direction"].notna()].copy()
+    seg_df["from_dp_name"] = seg_df["prev_dp_name"].astype(str)
+    seg_df["to_dp_name"] = seg_df["dp_name"].astype(str)
 
-    # Use train type from data, but force passenger by train_name starting with P when needed.
-    segment_source["train_group"] = segment_source["train_type"].astype(str)
-    passenger_mask = segment_source["train_name"].astype(str).str.startswith("P", na=False)
-    segment_source.loc[passenger_mask, "train_group"] = "Passenger"
-    segment_source.loc[~passenger_mask, "train_group"] = "Freight / Other"
+    seg_df["from_mileage"] = seg_df["prev_mileage"].astype(float)
+    seg_df["to_mileage"] = seg_df["mileage"].astype(float)
 
-    segment_source["segment_label"] = (
-        segment_source["direction"].astype(str)
-        + " | "
-        + segment_source["from_dp_name"].astype(str)
+    seg_df["segment_mid_mile"] = (seg_df["from_mileage"] + seg_df["to_mileage"]) / 2
+    seg_df["segment_width"] = (seg_df["to_mileage"] - seg_df["from_mileage"]).abs()
+
+    # Keep bars visible even for very short segments
+    seg_df["segment_width"] = seg_df["segment_width"].clip(lower=0.05)
+
+    seg_df["segment_label"] = (
+        seg_df["from_dp_name"]
         + " → "
-        + segment_source["to_dp_name"].astype(str)
+        + seg_df["to_dp_name"]
     )
 
-    segment_source["segment_mileage_label"] = (
-        segment_source["from_mileage"].round(2).astype(str)
-        + " → "
-        + segment_source["to_mileage"].round(2).astype(str)
-    )
+    # Occurrence means a positive delay event at this segment record
+    seg_df["delay_occurrence"] = (seg_df["total_delay_min_cn_filtered"] > 0).astype(int)
 
-    if segment_source.empty:
-        st.info("No valid segment delay data available after filtering.")
-        st.stop()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rows before filtering", f"{rows_before:,}")
-    c2.metric("Outlier delay rows excluded", f"{excluded_delay_rows:,}")
-    c3.metric("Zero/unknown-direction rows excluded", f"{zero_or_unknown_direction_rows:,}")
-    c4.metric("Outlier delay minutes excluded", f"{excluded_delay_minutes:,.0f}")
-
-    direction_filter = st.multiselect(
-        "Direction",
-        ["EB", "WB"],
-        default=["EB", "WB"],
-    )
-
-    group_filter = st.multiselect(
-        "Train group",
-        ["Passenger", "Freight / Other"],
-        default=["Passenger", "Freight / Other"],
-    )
-
-    filtered_segments = segment_source[
-        segment_source["direction"].isin(direction_filter)
-        & segment_source["train_group"].isin(group_filter)
-    ].copy()
-
-    if filtered_segments.empty:
-        st.info("No segment delay data after direction/train group filters.")
-        st.stop()
-
-    # One row per train run and segment. This avoids overweighting any duplicate DP rows.
-    train_segment_delay = (
-        filtered_segments.groupby(
+    # Aggregate by direction, segment, and train group
+    segment_summary = (
+        seg_df.groupby(
             [
-                "train_label",
-                "train_name",
-                "train_group",
                 "direction",
-                "from_dp_id",
                 "from_dp_name",
-                "from_mileage",
-                "to_dp_id",
                 "to_dp_name",
+                "from_mileage",
                 "to_mileage",
+                "segment_mid_mile",
+                "segment_width",
                 "segment_label",
-                "segment_mileage_label",
+                "train_group",
             ],
             dropna=False,
             observed=True,
         )
         .agg(
-            train_segment_delay_min=("segment_delay_min", "sum"),
-            rows=("segment_delay_min", "count"),
-        )
-        .reset_index()
-    )
-
-    segment_group_delay = (
-        train_segment_delay.groupby(
-            [
-                "train_group",
-                "direction",
-                "from_dp_id",
-                "from_dp_name",
-                "from_mileage",
-                "to_dp_id",
-                "to_dp_name",
-                "to_mileage",
-                "segment_label",
-                "segment_mileage_label",
-            ],
-            dropna=False,
-            observed=True,
-        )
-        .agg(
-            avg_train_segment_delay_min=("train_segment_delay_min", "mean"),
-            p50_train_segment_delay_min=("train_segment_delay_min", "median"),
-            max_train_segment_delay_min=("train_segment_delay_min", "max"),
-            total_segment_delay_min=("train_segment_delay_min", "sum"),
+            total_delay_min=("total_delay_min_cn_filtered", "sum"),
+            occurrences=("delay_occurrence", "sum"),
             train_runs=("train_label", "nunique"),
+            records=("train_label", "count"),
         )
         .reset_index()
     )
 
-    st.subheader("Average Train Delay by Segment")
+    segment_summary["avg_delay_per_occurrence"] = (
+        segment_summary["total_delay_min"] / segment_summary["occurrences"]
+    ).replace([float("inf"), -float("inf")], 0).fillna(0)
 
-    if segment_group_delay.empty:
-        st.info("No segment delay data available.")
-        st.stop()
+    segment_summary["avg_delay_per_train_run"] = (
+        segment_summary["total_delay_min"] / segment_summary["train_runs"]
+    ).replace([float("inf"), -float("inf")], 0).fillna(0)
 
-    max_segments = int(segment_group_delay["segment_label"].nunique())
-
-    top_n = st.slider(
-        "Show top N segments by combined average delay",
-        min_value=10,
-        max_value=max(10, min(200, max_segments)),
-        value=min(50, max_segments),
-        step=10,
-    )
-
-    top_segments = (
-        segment_group_delay.groupby(
-            ["direction", "segment_label", "from_mileage", "to_mileage"],
-            dropna=False,
-            observed=True,
+    # DP ticks sorted by MP, using only dp_name on the x-axis
+    dp_axis = (
+        pd.concat(
+            [
+                seg_df[["from_dp_name", "from_mileage"]]
+                .rename(columns={"from_dp_name": "dp_name", "from_mileage": "mileage"}),
+                seg_df[["to_dp_name", "to_mileage"]]
+                .rename(columns={"to_dp_name": "dp_name", "to_mileage": "mileage"}),
+            ],
+            ignore_index=True,
         )
-        .agg(combined_avg_delay_min=("avg_train_segment_delay_min", "sum"))
-        .reset_index()
-        .sort_values("combined_avg_delay_min", ascending=False)
-        .head(top_n)[["direction", "segment_label"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values("mileage")
     )
 
-    top_segment_keys = set(zip(top_segments["direction"], top_segments["segment_label"]))
+    tickvals = dp_axis["mileage"].tolist()
+    ticktext = dp_axis["dp_name"].astype(str).tolist()
 
-    plot_df = segment_group_delay[
-        segment_group_delay.apply(
-            lambda r: (r["direction"], r["segment_label"]) in top_segment_keys,
-            axis=1,
+    full_min_mp = float(dp_axis["mileage"].min())
+    full_max_mp = float(dp_axis["mileage"].max())
+    mp_padding = max((full_max_mp - full_min_mp) * 0.01, 0.5)
+
+    def make_segment_bar_chart(plot_df, direction, metric_col, chart_title, y_title):
+        fig = go.Figure()
+
+        group_order = ["Passenger", "Freight / Other"]
+
+        for group in group_order:
+            g = plot_df[plot_df["train_group"] == group].copy()
+
+            if g.empty:
+                continue
+
+            g = g.sort_values("segment_mid_mile")
+
+            fig.add_trace(
+                go.Bar(
+                    x=g["segment_mid_mile"],
+                    y=g[metric_col],
+                    width=g["segment_width"] * 0.85,
+                    name=group,
+                    customdata=g[
+                        [
+                            "from_dp_name",
+                            "to_dp_name",
+                            "from_mileage",
+                            "to_mileage",
+                            "segment_label",
+                            "total_delay_min",
+                            "occurrences",
+                            "avg_delay_per_occurrence",
+                            "avg_delay_per_train_run",
+                            "train_runs",
+                            "records",
+                        ]
+                    ],
+                    hovertemplate=(
+                        "Segment: %{customdata[4]}<br>"
+                        "From MP: %{customdata[2]:.2f}<br>"
+                        "To MP: %{customdata[3]:.2f}<br>"
+                        "Direction: " + direction + "<br>"
+                        "Train group: " + group + "<br>"
+                        "Total delay min: %{customdata[5]:,.2f}<br>"
+                        "Occurrences: %{customdata[6]:,}<br>"
+                        "Avg delay / occurrence: %{customdata[7]:,.2f} min<br>"
+                        "Avg delay / train run: %{customdata[8]:,.2f} min<br>"
+                        "Train runs: %{customdata[9]:,}<br>"
+                        "Records: %{customdata[10]:,}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+        fig.update_layout(
+            title=chart_title,
+            barmode="stack",
+            height=650,
+            hovermode="closest",
+            legend_title_text="Train group",
+            margin=dict(l=60, r=20, t=80, b=180),
+            plot_bgcolor="white",
         )
-    ].copy()
 
-    # Keep chart order by direction then physical segment order.
-    plot_df["sort_mile"] = plot_df[["from_mileage", "to_mileage"]].min(axis=1)
-    plot_df = plot_df.sort_values(["direction", "sort_mile", "segment_label", "train_group"])
+        fig.update_xaxes(
+            title="DP name sorted by MP",
+            range=[full_min_mp - mp_padding, full_max_mp + mp_padding],
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            tickangle=-60,
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor="rgba(180,180,180,0.35)",
+        )
 
-    fig = px.bar(
-        plot_df,
-        x="segment_label",
-        y="avg_train_segment_delay_min",
-        color="train_group",
-        barmode="stack",
-        hover_data=[
-            "direction",
-            "from_dp_name",
-            "to_dp_name",
-            "segment_mileage_label",
-            "avg_train_segment_delay_min",
-            "p50_train_segment_delay_min",
-            "max_train_segment_delay_min",
-            "total_segment_delay_min",
-            "train_runs",
-        ],
-        title="Stacked Average Train Delay by Segment and Direction",
-        labels={
-            "segment_label": "Segment",
-            "avg_train_segment_delay_min": "Average train delay, CN-filtered (min)",
-            "train_group": "Train group",
-        },
-    )
+        fig.update_yaxes(
+            title=y_title,
+            rangemode="tozero",
+            showgrid=True,
+            gridwidth=0.5,
+            gridcolor="rgba(180,180,180,0.35)",
+        )
 
-    fig.update_layout(
-        height=760,
-        xaxis_tickangle=-60,
-        hovermode="closest",
-    )
+        return fig
 
-    st.plotly_chart(fig, width="stretch")
+    # Direction tabs
+    eb_tab, wb_tab = st.tabs(["EB segments: MP decreases", "WB segments: MP increases"])
 
-    st.subheader("Segment Delay Summary Table")
-    safe_dataframe(
-        segment_group_delay.sort_values("avg_train_segment_delay_min", ascending=False),
-        max_rows=15000,
-    )
+    for tab, direction in [(eb_tab, "EB"), (wb_tab, "WB")]:
+        with tab:
+            dir_df = segment_summary[segment_summary["direction"] == direction].copy()
 
-    with st.expander("Train-level segment delay records"):
+            if dir_df.empty:
+                st.info(f"No {direction} segment delay data.")
+                continue
+
+            # Optional: hide zero-only segments from charts
+            show_zero_segments = st.checkbox(
+                f"Show zero-delay / zero-occurrence {direction} segments",
+                value=False,
+                key=f"show_zero_segments_{direction}",
+            )
+
+            if not show_zero_segments:
+                delay_plot_df = dir_df[dir_df["total_delay_min"] > 0].copy()
+                occ_plot_df = dir_df[dir_df["occurrences"] > 0].copy()
+            else:
+                delay_plot_df = dir_df.copy()
+                occ_plot_df = dir_df.copy()
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.subheader(f"{direction} total delay minutes")
+                if delay_plot_df.empty:
+                    st.info(f"No positive {direction} delay minutes after filtering.")
+                else:
+                    fig_delay = make_segment_bar_chart(
+                        delay_plot_df,
+                        direction=direction,
+                        metric_col="total_delay_min",
+                        chart_title=f"{direction} segment delay minutes by train group",
+                        y_title="Total delay minutes",
+                    )
+                    st.plotly_chart(fig_delay, width="stretch")
+
+            with c2:
+                st.subheader(f"{direction} delay occurrences")
+                if occ_plot_df.empty:
+                    st.info(f"No positive {direction} delay occurrences after filtering.")
+                else:
+                    fig_occ = make_segment_bar_chart(
+                        occ_plot_df,
+                        direction=direction,
+                        metric_col="occurrences",
+                        chart_title=f"{direction} segment delay occurrences by train group",
+                        y_title="Delay occurrences",
+                    )
+                    st.plotly_chart(fig_occ, width="stretch")
+
+            with st.expander(f"{direction} segment summary table"):
+                safe_dataframe(
+                    dir_df[
+                        [
+                            "direction",
+                            "from_dp_name",
+                            "to_dp_name",
+                            "from_mileage",
+                            "to_mileage",
+                            "segment_mid_mile",
+                            "train_group",
+                            "total_delay_min",
+                            "occurrences",
+                            "avg_delay_per_occurrence",
+                            "avg_delay_per_train_run",
+                            "train_runs",
+                            "records",
+                        ]
+                    ].sort_values(["segment_mid_mile", "train_group"]),
+                    max_rows=20000,
+                )
+
+    with st.expander("Raw segment records used for this view"):
         safe_dataframe(
-            train_segment_delay.sort_values("train_segment_delay_min", ascending=False),
-            max_rows=15000,
+            seg_df[
+                [
+                    "train_label",
+                    "train_name",
+                    "train_group",
+                    "direction",
+                    "from_dp_name",
+                    "to_dp_name",
+                    "from_mileage",
+                    "to_mileage",
+                    "segment_mid_mile",
+                    "total_delay_min_cn_filtered",
+                    "delay_occurrence",
+                ]
+            ].sort_values(["direction", "segment_mid_mile", "train_label"]),
+            max_rows=20000,
         )
-
 
 # =====================================================
 # 5. NEVER DISPATCHED TRAINS
