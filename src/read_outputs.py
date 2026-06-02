@@ -6,7 +6,7 @@ Created on Thu May 14 23:31:22 2026
 """
 from pathlib import Path
 import math
-import gc
+import gcs
 
 import pandas as pd
 import plotly.express as px
@@ -1362,10 +1362,10 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
     st.header("Delay / Occurrences by Current DP and Train Group")
 
     st.caption(
-        "This view uses only total_delay_min_cn_filtered. "
-        "Delay is assigned to the current DP. "
-        "EB and WB are separated using previous mileage to current mileage. "
-        "EB means mileage decreases; WB means mileage increases."
+        "This view uses total_delay_min_cn_filtered only. "
+        "Direction is based on train_name: '-east' = EB and '-west' = WB. "
+        "Train runs are the count of unique trains that pass each current DP. "
+        "Occurrences are the count of unique trains with positive filtered delay at that DP."
     )
 
     metric_choice = st.radio(
@@ -1375,12 +1375,15 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
     )
 
     OUTLIER_DELAY_LIMIT = st.number_input(
-        "Exclude delay records greater than this many minutes",
+        "Exclude delay values greater than this many minutes from delay/occurrence calculations",
         min_value=1,
         max_value=2_000_000,
         value=1_000_000,
         step=1000,
-        help="This removes placeholder values such as D999H99M99 that become very large numeric delays."
+        help=(
+            "This removes placeholder values such as D999H99M99. "
+            "These records still count as trains passing the DP, but their delay is treated as 0."
+        ),
     )
 
     needed_cols = [
@@ -1403,22 +1406,42 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
 
     dp_df["mileage"] = pd.to_numeric(dp_df["mileage"], errors="coerce")
     dp_df["arrival_seconds"] = pd.to_numeric(dp_df["arrival_seconds"], errors="coerce")
-    dp_df["total_delay_min_cn_filtered"] = pd.to_numeric(
+    dp_df["delay_raw_min"] = pd.to_numeric(
         dp_df["total_delay_min_cn_filtered"],
-        errors="coerce"
+        errors="coerce",
     ).fillna(0)
 
-    # Remove placeholder / outlier delay values
+    # Keep valid current-DP records. Do not drop huge placeholder delays here,
+    # because train_runs should count all trains that pass the DP.
     dp_df = dp_df[
-        dp_df["mileage"].notna()
+        dp_df["train_label"].notna()
+        & dp_df["train_name"].notna()
+        & dp_df["dp_id"].notna()
+        & dp_df["dp_name"].notna()
+        & dp_df["mileage"].notna()
         & dp_df["arrival_seconds"].notna()
-        & dp_df["total_delay_min_cn_filtered"].notna()
-        & (dp_df["total_delay_min_cn_filtered"] >= 0)
-        & (dp_df["total_delay_min_cn_filtered"] <= OUTLIER_DELAY_LIMIT)
     ].copy()
 
     if dp_df.empty:
-        st.info("No valid DP delay data after filtering.")
+        st.info("No valid current-DP data after filtering.")
+        st.stop()
+
+    # Direction comes from train_name, not from MP movement.
+    train_name_lower = dp_df["train_name"].astype(str).str.lower()
+    dp_df["direction"] = pd.NA
+    dp_df.loc[train_name_lower.str.contains("-east", na=False), "direction"] = "EB"
+    dp_df.loc[train_name_lower.str.contains("-west", na=False), "direction"] = "WB"
+
+    direction_missing = dp_df["direction"].isna().sum()
+    if direction_missing > 0:
+        st.warning(
+            f"{direction_missing:,} records do not contain '-east' or '-west' in train_name and are excluded from this view."
+        )
+
+    dp_df = dp_df[dp_df["direction"].notna()].copy()
+
+    if dp_df.empty:
+        st.info("No records with '-east' or '-west' in train_name.")
         st.stop()
 
     # Passenger / Freight grouping
@@ -1426,36 +1449,48 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
         {True: "Passenger", False: "Freight / Other"}
     )
 
-    # Sort each train run by time and create previous DP fields to infer direction
-    dp_df = dp_df.sort_values(["train_label", "arrival_seconds"]).copy()
-
-    dp_df["prev_dp_id"] = dp_df.groupby("train_label", observed=True)["dp_id"].shift(1)
-    dp_df["prev_dp_name"] = dp_df.groupby("train_label", observed=True)["dp_name"].shift(1)
-    dp_df["prev_mileage"] = dp_df.groupby("train_label", observed=True)["mileage"].shift(1)
-
-    # Keep records where direction can be inferred
-    dp_df = dp_df[
-        dp_df["prev_dp_id"].notna()
-        & dp_df["prev_dp_name"].notna()
-        & dp_df["prev_mileage"].notna()
-        & (dp_df["mileage"] != dp_df["prev_mileage"])
-    ].copy()
-
-    if dp_df.empty:
-        st.info("No valid records with previous DP/current DP movement.")
-        st.stop()
-
-    dp_df["direction"] = dp_df.apply(
-        lambda r: "EB" if r["mileage"] < r["prev_mileage"] else "WB",
-        axis=1
+    # Outlier delay handling: keep train pass record, but set bad delay values to 0.
+    dp_df["delay_is_outlier"] = (
+        (dp_df["delay_raw_min"] < 0)
+        | (dp_df["delay_raw_min"] > OUTLIER_DELAY_LIMIT)
     )
 
-    # Occurrence = positive delay at this current DP record
-    dp_df["delay_occurrence"] = (dp_df["total_delay_min_cn_filtered"] > 0).astype(int)
+    dp_df["delay_clean_min"] = dp_df["delay_raw_min"].where(
+        ~dp_df["delay_is_outlier"],
+        0,
+    )
 
-    # Aggregate by current DP, direction, and train group
-    dp_summary = (
+    # One record per train per current DP. This avoids double-counting if the raw file
+    # has duplicate rows for a train at the same DP.
+    train_dp = (
         dp_df.groupby(
+            [
+                "train_label",
+                "train_name",
+                "direction",
+                "dp_id",
+                "dp_name",
+                "mileage",
+                "train_group",
+            ],
+            dropna=False,
+            observed=True,
+        )
+        .agg(
+            total_delay_min=("delay_clean_min", "sum"),
+            raw_delay_min=("delay_raw_min", "sum"),
+            outlier_records=("delay_is_outlier", "sum"),
+            records=("train_label", "count"),
+        )
+        .reset_index()
+    )
+
+    # Occurrence = one train has positive cleaned CN-filtered delay at this current DP.
+    train_dp["delay_occurrence"] = (train_dp["total_delay_min"] > 0).astype(int)
+
+    # Aggregate by current DP, direction, and train group.
+    dp_summary = (
+        train_dp.groupby(
             [
                 "direction",
                 "dp_id",
@@ -1467,10 +1502,11 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
             observed=True,
         )
         .agg(
-            total_delay_min=("total_delay_min_cn_filtered", "sum"),
+            total_delay_min=("total_delay_min", "sum"),
             occurrences=("delay_occurrence", "sum"),
             train_runs=("train_label", "nunique"),
-            records=("train_label", "count"),
+            records=("records", "sum"),
+            outlier_records=("outlier_records", "sum"),
         )
         .reset_index()
     )
@@ -1483,23 +1519,23 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
         dp_summary["total_delay_min"] / dp_summary["train_runs"]
     ).replace([float("inf"), -float("inf")], 0).fillna(0)
 
-    # X-axis DP order sorted by MP.
-    # Use even spacing for bars, but keep MP sorting and MP in hover.
+    # X-axis DP order sorted by MP. Bars are evenly spaced, but sorted by MP.
     dp_axis = (
-        dp_df[["dp_name", "mileage"]]
+        train_dp[["dp_id", "dp_name", "mileage"]]
         .dropna()
-        .drop_duplicates()
+        .drop_duplicates(subset=["dp_id", "dp_name", "mileage"])
         .sort_values("mileage")
         .reset_index(drop=True)
     )
 
     dp_axis["dp_order"] = range(len(dp_axis))
+    dp_axis["dp_axis_label"] = dp_axis["dp_name"].astype(str)
 
-    dp_order_map = dict(zip(dp_axis["dp_name"].astype(str), dp_axis["dp_order"]))
-    dp_mile_map = dict(zip(dp_axis["dp_name"].astype(str), dp_axis["mileage"]))
+    dp_order_map = dict(zip(dp_axis["dp_id"], dp_axis["dp_order"]))
+    dp_mile_map = dict(zip(dp_axis["dp_id"], dp_axis["mileage"]))
 
-    dp_summary["dp_order"] = dp_summary["dp_name"].astype(str).map(dp_order_map)
-    dp_summary["dp_mileage"] = dp_summary["dp_name"].astype(str).map(dp_mile_map)
+    dp_summary["dp_order"] = dp_summary["dp_id"].map(dp_order_map)
+    dp_summary["dp_mileage"] = dp_summary["dp_id"].map(dp_mile_map)
 
     dp_summary = dp_summary[dp_summary["dp_order"].notna()].copy()
     dp_summary["dp_order"] = dp_summary["dp_order"].astype(int)
@@ -1512,14 +1548,13 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
         max_value=120,
         value=45,
         step=5,
-        help="Bars still include all DPs. This only controls how many DP names are printed on the x-axis."
+        help="Bars still include all DPs. This only controls how many DP names are printed on the x-axis.",
     )
 
     tick_step = max(1, math.ceil(len(dp_axis) / MAX_VISIBLE_X_LABELS))
-
     tick_axis = dp_axis.loc[dp_axis.index % tick_step == 0].copy()
     tickvals = tick_axis["dp_order"].tolist()
-    ticktext = tick_axis["dp_name"].astype(str).tolist()
+    ticktext = tick_axis["dp_axis_label"].astype(str).tolist()
 
     x_min = -0.5
     x_max = len(dp_axis) - 0.5
@@ -1536,7 +1571,7 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
     show_zero_dps = st.checkbox(
         "Show zero-value DPs",
         value=False,
-        help="If unchecked, only DPs with positive delay or occurrence values are shown."
+        help="If unchecked, only DPs with positive delay or occurrence values are shown.",
     )
 
     def make_dp_bar_chart(plot_df, direction):
@@ -1574,6 +1609,7 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                             "avg_delay_per_train_run",
                             "train_runs",
                             "records",
+                            "outlier_records",
                         ]
                     ],
                     hovertemplate=(
@@ -1586,8 +1622,9 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                         "Occurrences: %{customdata[4]:,}<br>"
                         "Avg delay / occurrence: %{customdata[5]:,.2f} min<br>"
                         "Avg delay / train run: %{customdata[6]:,.2f} min<br>"
-                        "Train runs: %{customdata[7]:,}<br>"
-                        "Records: %{customdata[8]:,}"
+                        "Total train runs passing DP: %{customdata[7]:,}<br>"
+                        "Raw records: %{customdata[8]:,}<br>"
+                        "Outlier delay records ignored: %{customdata[9]:,}"
                         "<extra></extra>"
                     ),
                 )
@@ -1631,6 +1668,13 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
 
         return fig
 
+    # Quick data checks
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("EB train-DP records", f"{len(train_dp[train_dp['direction'] == 'EB']):,}")
+    c2.metric("WB train-DP records", f"{len(train_dp[train_dp['direction'] == 'WB']):,}")
+    c3.metric("Unique trains", f"{train_dp['train_label'].nunique():,}")
+    c4.metric("Outlier delay records ignored", f"{int(dp_df['delay_is_outlier'].sum()):,}")
+
     for direction in ["EB", "WB"]:
         st.subheader(f"{direction} current DP")
 
@@ -1668,32 +1712,32 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                         "avg_delay_per_train_run",
                         "train_runs",
                         "records",
+                        "outlier_records",
                     ]
                 ].sort_values(["dp_order", "train_group"]),
                 max_rows=20000,
             )
 
-    with st.expander("Raw current-DP records used for this view"):
+    with st.expander("Raw current-DP train records used for this view"):
         safe_dataframe(
-            dp_df[
+            train_dp[
                 [
                     "train_label",
                     "train_name",
                     "train_group",
                     "direction",
-                    "prev_dp_name",
-                    "prev_mileage",
                     "dp_name",
                     "dp_id",
                     "mileage",
-                    "total_delay_min_cn_filtered",
+                    "total_delay_min",
+                    "raw_delay_min",
                     "delay_occurrence",
+                    "records",
+                    "outlier_records",
                 ]
             ].sort_values(["direction", "mileage", "train_label"]),
             max_rows=20000,
         )
-
-
 # =====================================================
 # 5. NEVER DISPATCHED TRAINS
 # =====================================================
