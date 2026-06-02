@@ -1912,12 +1912,13 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
     run_time["last_departure_hhmm"] = run_time["last_departure_tod_hr"].apply(hr_to_hhmm)
 
     sort_choice = st.radio(
-        "Sort train names",
+        "Sort freight train names",
         ["By median time", "By first letter / train name"],
         horizontal=True,
         help=(
-            "By median time sorts each chart by the median arrival/departure time. "
-            "By first letter / train name sorts alphabetically using train_name before the first dash."
+            "This sorting option only changes Freight / Other charts. "
+            "Passenger charts stay sorted by median time. "
+            "X-axis labels still use train_name before the first dash."
         ),
     )
 
@@ -1930,11 +1931,18 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
         help="Use this to keep the boxplot readable if there are many train names.",
     )
 
-    def get_order(plot_df, metric_col):
+    def get_order(plot_df, metric_col, group_name):
         if plot_df.empty:
             return []
 
-        if sort_choice == "By first letter / train name":
+        # User request: only apply alphabetical / first-letter train-name sorting
+        # to Freight / Other charts. Passenger charts stay sorted by median time.
+        use_alpha_sort = (
+            group_name == "Freight / Other"
+            and sort_choice == "By first letter / train name"
+        )
+
+        if use_alpha_sort:
             order = sorted(plot_df["train_name_short"].dropna().astype(str).unique())
         else:
             order = (
@@ -1951,7 +1959,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
         if plot_df.empty:
             return None
 
-        order = get_order(plot_df, metric_col)
+        order = get_order(plot_df, metric_col, group_name)
 
         if not order:
             return None
@@ -1986,8 +1994,11 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
         fig.update_layout(
             height=650,
             hovermode="closest",
+            template="plotly_dark",
             margin=dict(l=70, r=30, t=80, b=180),
-            plot_bgcolor="white",
+            plot_bgcolor="#111111",
+            paper_bgcolor="#111111",
+            font=dict(color="white"),
         )
 
         fig.update_xaxes(
@@ -1995,7 +2006,8 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
             title="Train name before first '-'",
             showgrid=True,
             gridwidth=0.4,
-            gridcolor="rgba(180,180,180,0.35)",
+            gridcolor="rgba(255,255,255,0.15)",
+            zeroline=False,
         )
 
         fig.update_yaxes(
@@ -2004,7 +2016,8 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
             title=y_title,
             showgrid=True,
             gridwidth=0.4,
-            gridcolor="rgba(180,180,180,0.35)",
+            gridcolor="rgba(255,255,255,0.15)",
+            zeroline=False,
         )
 
         return fig
