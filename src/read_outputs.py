@@ -1483,20 +1483,46 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
         dp_summary["total_delay_min"] / dp_summary["train_runs"]
     ).replace([float("inf"), -float("inf")], 0).fillna(0)
 
-    # X-axis DP labels sorted by MP
+    # X-axis DP order sorted by MP.
+    # Use even spacing for bars, but keep MP sorting and MP in hover.
     dp_axis = (
         dp_df[["dp_name", "mileage"]]
         .dropna()
         .drop_duplicates()
         .sort_values("mileage")
+        .reset_index(drop=True)
     )
 
-    tickvals = dp_axis["mileage"].tolist()
-    ticktext = dp_axis["dp_name"].astype(str).tolist()
+    dp_axis["dp_order"] = range(len(dp_axis))
 
-    full_min_mp = float(dp_axis["mileage"].min())
-    full_max_mp = float(dp_axis["mileage"].max())
-    mp_padding = max((full_max_mp - full_min_mp) * 0.01, 0.5)
+    dp_order_map = dict(zip(dp_axis["dp_name"].astype(str), dp_axis["dp_order"]))
+    dp_mile_map = dict(zip(dp_axis["dp_name"].astype(str), dp_axis["mileage"]))
+
+    dp_summary["dp_order"] = dp_summary["dp_name"].astype(str).map(dp_order_map)
+    dp_summary["dp_mileage"] = dp_summary["dp_name"].astype(str).map(dp_mile_map)
+
+    dp_summary = dp_summary[dp_summary["dp_order"].notna()].copy()
+    dp_summary["dp_order"] = dp_summary["dp_order"].astype(int)
+    dp_summary["dp_mileage"] = pd.to_numeric(dp_summary["dp_mileage"], errors="coerce")
+
+    # Show only some DP names on the x-axis so labels stay readable.
+    MAX_VISIBLE_X_LABELS = st.slider(
+        "Maximum visible DP labels on x-axis",
+        min_value=10,
+        max_value=120,
+        value=45,
+        step=5,
+        help="Bars still include all DPs. This only controls how many DP names are printed on the x-axis."
+    )
+
+    tick_step = max(1, math.ceil(len(dp_axis) / MAX_VISIBLE_X_LABELS))
+
+    tick_axis = dp_axis.loc[dp_axis.index % tick_step == 0].copy()
+    tickvals = tick_axis["dp_order"].tolist()
+    ticktext = tick_axis["dp_name"].astype(str).tolist()
+
+    x_min = -0.5
+    x_max = len(dp_axis) - 0.5
 
     if metric_choice == "Delay minutes":
         metric_col = "total_delay_min"
@@ -1516,7 +1542,12 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
     def make_dp_bar_chart(plot_df, direction):
         fig = go.Figure()
 
-        group_order = ["Passenger", "Freight / Other"]
+        group_order = ["Freight / Other", "Passenger"]
+
+        group_colors = {
+            "Passenger": "#d62728",
+            "Freight / Other": "#1f77b4",
+        }
 
         for group in group_order:
             g = plot_df[plot_df["train_group"] == group].copy()
@@ -1524,18 +1555,19 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
             if g.empty:
                 continue
 
-            g = g.sort_values("mileage")
+            g = g.sort_values("dp_order")
 
             fig.add_trace(
                 go.Bar(
-                    x=g["mileage"],
+                    x=g["dp_order"],
                     y=g[metric_col],
                     name=group,
+                    marker_color=group_colors.get(group, "#888888"),
                     customdata=g[
                         [
                             "dp_name",
                             "dp_id",
-                            "mileage",
+                            "dp_mileage",
                             "total_delay_min",
                             "occurrences",
                             "avg_delay_per_occurrence",
@@ -1564,31 +1596,37 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
         fig.update_layout(
             title=f"{direction} current-DP {chart_metric_title} by train group",
             barmode="stack",
-            height=720,
+            height=780,
             hovermode="closest",
+            template="plotly_dark",
             legend_title_text="Train group",
-            margin=dict(l=70, r=30, t=80, b=190),
-            plot_bgcolor="white",
+            margin=dict(l=80, r=40, t=80, b=170),
+            bargap=0.15,
+            plot_bgcolor="#111111",
+            paper_bgcolor="#111111",
+            font=dict(color="white"),
         )
 
         fig.update_xaxes(
             title="Current DP name sorted by MP",
-            range=[full_min_mp - mp_padding, full_max_mp + mp_padding],
+            range=[x_min, x_max],
             tickmode="array",
             tickvals=tickvals,
             ticktext=ticktext,
-            tickangle=-60,
+            tickangle=-45,
             showgrid=True,
-            gridwidth=0.5,
-            gridcolor="rgba(180,180,180,0.35)",
+            gridwidth=0.4,
+            gridcolor="rgba(255,255,255,0.12)",
+            zeroline=False,
         )
 
         fig.update_yaxes(
             title=y_title,
             rangemode="tozero",
             showgrid=True,
-            gridwidth=0.5,
-            gridcolor="rgba(180,180,180,0.35)",
+            gridwidth=0.4,
+            gridcolor="rgba(255,255,255,0.12)",
+            zeroline=False,
         )
 
         return fig
@@ -1621,7 +1659,8 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                         "direction",
                         "dp_id",
                         "dp_name",
-                        "mileage",
+                        "dp_mileage",
+                        "dp_order",
                         "train_group",
                         "total_delay_min",
                         "occurrences",
@@ -1630,7 +1669,7 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                         "train_runs",
                         "records",
                     ]
-                ].sort_values(["mileage", "train_group"]),
+                ].sort_values(["dp_order", "train_group"]),
                 max_rows=20000,
             )
 
