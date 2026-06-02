@@ -172,6 +172,9 @@ def load_parquet(path):
     delay_cols = [
         c for c in schema_cols
         if c.startswith("delay_minutes_")
+        or c.startswith("delay_seconds_")
+        or c.startswith("delay_code_")
+        or c.startswith("delay_code_group_")
         or c.startswith("included_by_cn_filter_")
     ]
 
@@ -208,6 +211,87 @@ def normalize_bool_series(s):
 def safe_dataframe(df, max_rows=5000):
     st.caption(f"Showing first {min(len(df), max_rows):,} rows out of {len(df):,}.")
     st.dataframe(df.head(max_rows), width="stretch")
+
+
+def build_placeholder_delay_table(data, placeholder_min=1_438_560):
+    """
+    Find placeholder/outlier delay values such as 1438560 minutes.
+    This table is independent from the chart logic. It lists the raw delay sequence,
+    delay code, DP, and train information so the records can be checked and downloaded.
+    """
+    delay_min_cols = sorted(
+        [c for c in data.columns if c.startswith("delay_minutes_")],
+        key=lambda x: int(x.split("_")[-1]) if x.split("_")[-1].isdigit() else 999,
+    )
+
+    if not delay_min_cols:
+        return pd.DataFrame()
+
+    base_cols = [
+        "train_label",
+        "generated_train_id",
+        "train_name",
+        "dp_id",
+        "dp_name",
+        "mileage",
+        "arrival_hour",
+        "arrival_ddhhmmss",
+        "departure_ddhhmmss",
+    ]
+
+    out_rows = []
+
+    for delay_col in delay_min_cols:
+        seq = delay_col.split("_")[-1]
+        code_col = f"delay_code_{seq}"
+        group_col = f"delay_code_group_{seq}"
+        include_col = f"included_by_cn_filter_{seq}"
+
+        delay_values = pd.to_numeric(data[delay_col], errors="coerce")
+        mask = delay_values.notna() & (delay_values >= placeholder_min)
+
+        if not mask.any():
+            continue
+
+        bad = data.loc[mask].copy()
+        keep_cols = [c for c in base_cols if c in bad.columns]
+        bad_out = bad[keep_cols].copy()
+
+        bad_out["delay_sequence"] = seq
+        bad_out["delay_column"] = delay_col
+        bad_out["placeholder_delay_minutes"] = delay_values.loc[mask].values
+
+        if code_col in bad.columns:
+            bad_out["delay_code"] = bad[code_col]
+        else:
+            bad_out["delay_code"] = pd.NA
+
+        if group_col in bad.columns:
+            bad_out["delay_code_group"] = bad[group_col]
+        else:
+            bad_out["delay_code_group"] = pd.NA
+
+        if include_col in bad.columns:
+            bad_out["included_by_cn_filter"] = bad[include_col]
+        else:
+            bad_out["included_by_cn_filter"] = pd.NA
+
+        out_rows.append(bad_out)
+
+    if not out_rows:
+        return pd.DataFrame()
+
+    result = pd.concat(out_rows, ignore_index=True)
+
+    sort_cols = [
+        c for c in ["train_name", "train_label", "dp_id", "delay_sequence"]
+        if c in result.columns
+    ]
+
+    if sort_cols:
+        result = result.sort_values(sort_cols, na_position="last")
+
+    return result
 
 
 
@@ -1717,6 +1801,75 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
                 ].sort_values(["dp_order", "train_group"]),
                 max_rows=20000,
             )
+
+    st.divider()
+    st.subheader("Placeholder / Outlier Delay Records")
+
+    placeholder_min = st.number_input(
+        "Placeholder delay threshold for table",
+        min_value=1,
+        max_value=2_000_000,
+        value=1_438_560,
+        step=1000,
+        help=(
+            "Rows with any delay_minutes_* value at or above this threshold are listed here. "
+            "These are shown for QA/download and are not included as real delay in the charts."
+        ),
+    )
+
+    placeholder_delay_table = build_placeholder_delay_table(
+        base_df,
+        placeholder_min=placeholder_min,
+    )
+
+    if placeholder_delay_table.empty:
+        st.success("No placeholder/outlier delay records found at this threshold.")
+    else:
+        unique_trains = (
+            placeholder_delay_table["train_label"].nunique()
+            if "train_label" in placeholder_delay_table.columns
+            else 0
+        )
+
+        st.warning(
+            f"Found {len(placeholder_delay_table):,} placeholder/outlier delay records "
+            f"from {unique_trains:,} train runs."
+        )
+
+        display_cols = [
+            "train_label",
+            "generated_train_id",
+            "train_name",
+            "dp_id",
+            "dp_name",
+            "mileage",
+            "arrival_hour",
+            "arrival_ddhhmmss",
+            "departure_ddhhmmss",
+            "delay_sequence",
+            "delay_column",
+            "delay_code",
+            "delay_code_group",
+            "included_by_cn_filter",
+            "placeholder_delay_minutes",
+        ]
+
+        display_cols = [c for c in display_cols if c in placeholder_delay_table.columns]
+
+        st.dataframe(
+            placeholder_delay_table[display_cols],
+            width="stretch",
+            hide_index=True,
+        )
+
+        csv_data = placeholder_delay_table[display_cols].to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            label="Download placeholder delay records CSV",
+            data=csv_data,
+            file_name="placeholder_delay_records_1438560.csv",
+            mime="text/csv",
+        )
 
     with st.expander("Raw current-DP train records used for this view"):
         safe_dataframe(
