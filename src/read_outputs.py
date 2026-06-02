@@ -22,7 +22,7 @@ from yaml.loader import SafeLoader
 # PAGE SETUP
 # =====================================================
 st.set_page_config(layout="wide")
-st.title("VIA Smart Network Dashboard-check")
+st.title("VIA Smart Network Dashboard")
 
 
 # =====================================================
