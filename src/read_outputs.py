@@ -1937,7 +1937,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
         # to Freight / Other charts. Passenger charts stay sorted by median time.
         use_alpha_sort = (
             group_name == "Freight / Other"
-            and sort_choice == "By first letter / train name"
+            and sort_choice == "By first letter / train type"
         )
 
         if use_alpha_sort:
