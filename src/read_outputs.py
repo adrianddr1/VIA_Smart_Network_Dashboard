@@ -4,6 +4,7 @@ Created on Thu May 14 23:31:22 2026
 
 @author: ZhaoJ
 """
+
 from pathlib import Path
 import math
 import gc
@@ -810,11 +811,6 @@ if st.session_state.active_view == "Main Menu":
             st.session_state.active_view = "Never Dispatched Trains"
             st.rerun()
 
-        if st.button("7. Arrival/Departure Time Distribution", width="stretch"):
-            clear_memory()
-            st.session_state.active_view = "Arrival/Departure Time Distribution"
-            st.rerun()
-
     with c2:
         if st.button("3. Speed Distribution by Train Name", width="stretch"):
             clear_memory()
@@ -829,6 +825,11 @@ if st.session_state.active_view == "Main Menu":
         if st.button("6. TPC/Base Run Comparison", width="stretch"):
             clear_memory()
             st.session_state.active_view = "TPC/Base Run Comparison"
+            st.rerun()
+
+        if st.button("7. Arrival/Departure Time Distribution", width="stretch"):
+            clear_memory()
+            st.session_state.active_view = "Arrival/Departure Time Distribution"
             st.rerun()
 
     st.stop()
@@ -1743,295 +1744,6 @@ elif st.session_state.active_view == "Average Delay by DP and Train Group":
             ].sort_values(["direction", "mileage", "train_label"]),
             max_rows=20000,
         )
-
-# =====================================================
-# 7. ARRIVAL / DEPARTURE TIME DISTRIBUTION
-# =====================================================
-elif st.session_state.active_view == "Arrival/Departure Time Distribution":
-    st.header("Arrival/Departure Time Distribution")
-
-    st.caption(
-        "For each generated train run, this view takes the first arrival time at the network "
-        "and the last departure time at the network. Times are converted to time-of-day "
-        "within 0-24 hours using seconds modulo 24 hours."
-    )
-
-    needed_cols = [
-        "train_label",
-        "generated_train_id",
-        "train_name",
-        "arrival_seconds",
-        "departure_seconds",
-    ]
-
-    missing_cols = [c for c in needed_cols if c not in base_df.columns]
-
-    if missing_cols:
-        st.error(f"Missing required columns: {missing_cols}")
-        st.stop()
-
-    time_df = base_df[needed_cols].copy()
-
-    time_df["arrival_seconds"] = pd.to_numeric(time_df["arrival_seconds"], errors="coerce")
-    time_df["departure_seconds"] = pd.to_numeric(time_df["departure_seconds"], errors="coerce")
-    time_df["train_name"] = time_df["train_name"].astype(str)
-    time_df["train_label"] = time_df["train_label"].astype(str)
-
-    time_df = time_df[
-        time_df["train_label"].notna()
-        & time_df["train_name"].notna()
-        & time_df["arrival_seconds"].notna()
-        & time_df["departure_seconds"].notna()
-        & (time_df["arrival_seconds"] >= 0)
-        & (time_df["departure_seconds"] >= 0)
-    ].copy()
-
-    if time_df.empty:
-        st.info("No valid arrival/departure records after filtering.")
-        st.stop()
-
-    run_time_summary = (
-        time_df.groupby(
-            ["train_label", "generated_train_id", "train_name"],
-            dropna=False,
-            observed=True,
-        )
-        .agg(
-            first_arrival_seconds=("arrival_seconds", "min"),
-            last_departure_seconds=("departure_seconds", "max"),
-            records=("train_label", "count"),
-        )
-        .reset_index()
-    )
-
-    run_time_summary["train_group"] = run_time_summary["train_name"].astype(str).str.startswith("P").map(
-        {True: "Passenger", False: "Freight / Other"}
-    )
-
-    run_time_summary["first_arrival_hour_of_day"] = (
-        run_time_summary["first_arrival_seconds"] % 86400
-    ) / 3600
-
-    run_time_summary["last_departure_hour_of_day"] = (
-        run_time_summary["last_departure_seconds"] % 86400
-    ) / 3600
-
-    run_time_summary["first_arrival_day"] = (
-        run_time_summary["first_arrival_seconds"] // 86400
-    ).astype(int)
-
-    run_time_summary["last_departure_day"] = (
-        run_time_summary["last_departure_seconds"] // 86400
-    ).astype(int)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Train runs", f"{run_time_summary['train_label'].nunique():,}")
-    c2.metric("Train names", f"{run_time_summary['train_name'].nunique():,}")
-    c3.metric(
-        "Passenger runs",
-        f"{run_time_summary[run_time_summary['train_group'] == 'Passenger']['train_label'].nunique():,}",
-    )
-    c4.metric(
-        "Freight/Other runs",
-        f"{run_time_summary[run_time_summary['train_group'] == 'Freight / Other']['train_label'].nunique():,}",
-    )
-
-    sort_option = st.radio(
-        "Train-name order",
-        ["Median time", "Train name"],
-        horizontal=True,
-    )
-
-    show_points = st.checkbox(
-        "Show outlier points",
-        value=True,
-        help="Turn off if the boxplots are too dense."
-    )
-
-    def make_time_boxplot(plot_df, y_col, title):
-        if plot_df.empty:
-            return None
-
-        if sort_option == "Median time":
-            category_order = (
-                plot_df.groupby("train_name", observed=True)[y_col]
-                .median()
-                .sort_values()
-                .index
-                .tolist()
-            )
-        else:
-            category_order = sorted(plot_df["train_name"].astype(str).unique())
-
-        fig = px.box(
-            plot_df,
-            x="train_name",
-            y=y_col,
-            category_orders={"train_name": category_order},
-            points="outliers" if show_points else False,
-            hover_data=[
-                "train_label",
-                "generated_train_id",
-                "first_arrival_day",
-                "last_departure_day",
-                "records",
-            ],
-            labels={
-                "train_name": "Train name",
-                y_col: "Time of day (hours)",
-            },
-            title=title,
-        )
-
-        fig.update_layout(
-            height=720,
-            template="plotly_dark",
-            margin=dict(l=70, r=40, t=80, b=180),
-            plot_bgcolor="#111111",
-            paper_bgcolor="#111111",
-            font=dict(color="white"),
-            showlegend=False,
-        )
-
-        fig.update_xaxes(
-            tickangle=-60,
-            showgrid=False,
-        )
-
-        fig.update_yaxes(
-            range=[0, 24],
-            dtick=2,
-            title="Time of day (0-24 hours)",
-            showgrid=True,
-            gridwidth=0.5,
-            gridcolor="rgba(255,255,255,0.15)",
-            zeroline=False,
-        )
-
-        return fig
-
-    passenger_df = run_time_summary[
-        run_time_summary["train_group"] == "Passenger"
-    ].copy()
-
-    freight_df = run_time_summary[
-        run_time_summary["train_group"] == "Freight / Other"
-    ].copy()
-
-    st.divider()
-    st.subheader("First arrival time at network")
-
-    fig = make_time_boxplot(
-        passenger_df,
-        "first_arrival_hour_of_day",
-        "Passenger trains: first arrival time at network",
-    )
-
-    if fig is None:
-        st.info("No passenger train runs available for first-arrival distribution.")
-    else:
-        st.plotly_chart(fig, width="stretch")
-
-    fig = make_time_boxplot(
-        freight_df,
-        "first_arrival_hour_of_day",
-        "Freight / Other trains: first arrival time at network",
-    )
-
-    if fig is None:
-        st.info("No freight/other train runs available for first-arrival distribution.")
-    else:
-        st.plotly_chart(fig, width="stretch")
-
-    st.divider()
-    st.subheader("Last departure time at network")
-
-    fig = make_time_boxplot(
-        passenger_df,
-        "last_departure_hour_of_day",
-        "Passenger trains: last departure time at network",
-    )
-
-    if fig is None:
-        st.info("No passenger train runs available for last-departure distribution.")
-    else:
-        st.plotly_chart(fig, width="stretch")
-
-    fig = make_time_boxplot(
-        freight_df,
-        "last_departure_hour_of_day",
-        "Freight / Other trains: last departure time at network",
-    )
-
-    if fig is None:
-        st.info("No freight/other train runs available for last-departure distribution.")
-    else:
-        st.plotly_chart(fig, width="stretch")
-
-    with st.expander("Train-name percentile summary"):
-        percentile_summary = (
-            run_time_summary.groupby(["train_group", "train_name"], dropna=False, observed=True)
-            .agg(
-                train_runs=("train_label", "nunique"),
-                first_arrival_min=("first_arrival_hour_of_day", "min"),
-                first_arrival_p25=("first_arrival_hour_of_day", lambda x: x.quantile(0.25)),
-                first_arrival_p50=("first_arrival_hour_of_day", "median"),
-                first_arrival_p75=("first_arrival_hour_of_day", lambda x: x.quantile(0.75)),
-                first_arrival_max=("first_arrival_hour_of_day", "max"),
-                last_departure_min=("last_departure_hour_of_day", "min"),
-                last_departure_p25=("last_departure_hour_of_day", lambda x: x.quantile(0.25)),
-                last_departure_p50=("last_departure_hour_of_day", "median"),
-                last_departure_p75=("last_departure_hour_of_day", lambda x: x.quantile(0.75)),
-                last_departure_max=("last_departure_hour_of_day", "max"),
-            )
-            .reset_index()
-            .sort_values(["train_group", "first_arrival_p50", "train_name"])
-        )
-
-        safe_dataframe(percentile_summary, max_rows=20000)
-
-        csv_data = percentile_summary.to_csv(index=False).encode("utf-8")
-
-        st.download_button(
-            label="Download arrival/departure percentile summary CSV",
-            data=csv_data,
-            file_name="arrival_departure_time_distribution_summary.csv",
-            mime="text/csv",
-        )
-
-    with st.expander("Raw train-run arrival/departure records"):
-        display_cols = [
-            "train_label",
-            "generated_train_id",
-            "train_name",
-            "train_group",
-            "first_arrival_seconds",
-            "first_arrival_day",
-            "first_arrival_hour_of_day",
-            "last_departure_seconds",
-            "last_departure_day",
-            "last_departure_hour_of_day",
-            "records",
-        ]
-
-        safe_dataframe(
-            run_time_summary[display_cols].sort_values(
-                ["train_group", "train_name", "first_arrival_seconds"]
-            ),
-            max_rows=30000,
-        )
-
-        csv_data = run_time_summary[display_cols].to_csv(index=False).encode("utf-8")
-
-        st.download_button(
-            label="Download raw train-run arrival/departure records CSV",
-            data=csv_data,
-            file_name="arrival_departure_time_distribution_raw.csv",
-            mime="text/csv",
-        )
-
-
-
 # =====================================================
 # 5. NEVER DISPATCHED TRAINS
 # =====================================================
@@ -2121,6 +1833,298 @@ elif st.session_state.active_view == "Never Dispatched Trains":
         max_rows=20000
     )
 
+
+
+# =====================================================
+# 7. ARRIVAL / DEPARTURE TIME DISTRIBUTION
+# =====================================================
+elif st.session_state.active_view == "Arrival/Departure Time Distribution":
+    st.header("Arrival/Departure Time Distribution")
+
+    st.caption(
+        "For each train run, this view uses the first arrival time at the network "
+        "and the last departure time at the network. Times are shown as time-of-day "
+        "from 0 to 24 hours. X-axis labels use train_name before the first dash."
+    )
+
+    needed_cols = [
+        "train_label",
+        "train_name",
+        "arrival_seconds",
+        "departure_seconds",
+    ]
+
+    missing_cols = [c for c in needed_cols if c not in base_df.columns]
+
+    if missing_cols:
+        st.error(f"Missing required columns: {missing_cols}")
+        st.stop()
+
+    time_df = base_df[needed_cols].copy()
+
+    time_df["arrival_seconds"] = pd.to_numeric(time_df["arrival_seconds"], errors="coerce")
+    time_df["departure_seconds"] = pd.to_numeric(time_df["departure_seconds"], errors="coerce")
+    time_df["train_name"] = time_df["train_name"].astype(str)
+    time_df["train_label"] = time_df["train_label"].astype(str)
+
+    time_df = time_df[
+        time_df["train_label"].notna()
+        & time_df["train_name"].notna()
+        & time_df["arrival_seconds"].notna()
+        & time_df["departure_seconds"].notna()
+        & (time_df["departure_seconds"] >= 0)
+        & (time_df["arrival_seconds"] >= 0)
+    ].copy()
+
+    if time_df.empty:
+        st.info("No valid arrival/departure time records.")
+        st.stop()
+
+    # One row per train_label / train run
+    run_time = (
+        time_df.groupby(["train_label", "train_name"], dropna=False, observed=True)
+        .agg(
+            first_arrival_seconds=("arrival_seconds", "min"),
+            last_departure_seconds=("departure_seconds", "max"),
+            records=("arrival_seconds", "count"),
+        )
+        .reset_index()
+    )
+
+    run_time["train_name_short"] = run_time["train_name"].astype(str).str.split("-").str[0]
+    run_time["train_group"] = run_time["train_name_short"].astype(str).str.startswith("P").map(
+        {True: "Passenger", False: "Freight / Other"}
+    )
+
+    # Time-of-day in hours, 0 to 24
+    run_time["first_arrival_tod_hr"] = (run_time["first_arrival_seconds"] % 86400) / 3600
+    run_time["last_departure_tod_hr"] = (run_time["last_departure_seconds"] % 86400) / 3600
+
+    def hr_to_hhmm(x):
+        if pd.isna(x):
+            return ""
+        total_min = int(round(float(x) * 60)) % (24 * 60)
+        h = total_min // 60
+        m = total_min % 60
+        return f"{h:02d}:{m:02d}"
+
+    run_time["first_arrival_hhmm"] = run_time["first_arrival_tod_hr"].apply(hr_to_hhmm)
+    run_time["last_departure_hhmm"] = run_time["last_departure_tod_hr"].apply(hr_to_hhmm)
+
+    sort_choice = st.radio(
+        "Sort train names",
+        ["By median time", "By first letter / train name"],
+        horizontal=True,
+        help=(
+            "By median time sorts each chart by the median arrival/departure time. "
+            "By first letter / train name sorts alphabetically using train_name before the first dash."
+        ),
+    )
+
+    max_train_names = st.slider(
+        "Maximum train names shown per chart",
+        min_value=10,
+        max_value=200,
+        value=120,
+        step=10,
+        help="Use this to keep the boxplot readable if there are many train names.",
+    )
+
+    def get_order(plot_df, metric_col):
+        if plot_df.empty:
+            return []
+
+        if sort_choice == "By first letter / train name":
+            order = sorted(plot_df["train_name_short"].dropna().astype(str).unique())
+        else:
+            order = (
+                plot_df.groupby("train_name_short", observed=True)[metric_col]
+                .median()
+                .sort_values()
+                .index.astype(str)
+                .tolist()
+            )
+
+        return order[:max_train_names]
+
+    def make_boxplot(plot_df, group_name, metric_col, title, y_title):
+        if plot_df.empty:
+            return None
+
+        order = get_order(plot_df, metric_col)
+
+        if not order:
+            return None
+
+        plot_df = plot_df[plot_df["train_name_short"].astype(str).isin(order)].copy()
+
+        if plot_df.empty:
+            return None
+
+        fig = px.box(
+            plot_df,
+            x="train_name_short",
+            y=metric_col,
+            category_orders={"train_name_short": order},
+            points="outliers",
+            hover_data={
+                "train_label": True,
+                "train_name": True,
+                "train_name_short": False,
+                metric_col: ":.2f",
+                "first_arrival_hhmm": True,
+                "last_departure_hhmm": True,
+                "records": True,
+            },
+            title=title,
+            labels={
+                "train_name_short": "Train name",
+                metric_col: y_title,
+            },
+        )
+
+        fig.update_layout(
+            height=650,
+            hovermode="closest",
+            margin=dict(l=70, r=30, t=80, b=180),
+            plot_bgcolor="white",
+        )
+
+        fig.update_xaxes(
+            tickangle=-60,
+            title="Train name before first '-'",
+            showgrid=True,
+            gridwidth=0.4,
+            gridcolor="rgba(180,180,180,0.35)",
+        )
+
+        fig.update_yaxes(
+            range=[0, 24],
+            dtick=2,
+            title=y_title,
+            showgrid=True,
+            gridwidth=0.4,
+            gridcolor="rgba(180,180,180,0.35)",
+        )
+
+        return fig
+
+    passenger_df = run_time[run_time["train_group"] == "Passenger"].copy()
+    freight_df = run_time[run_time["train_group"] == "Freight / Other"].copy()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Passenger train runs", f"{passenger_df['train_label'].nunique():,}")
+    c2.metric("Freight / other train runs", f"{freight_df['train_label'].nunique():,}")
+    c3.metric("Train names", f"{run_time['train_name_short'].nunique():,}")
+
+    st.subheader("First arrival time at network")
+
+    fig = make_boxplot(
+        passenger_df,
+        group_name="Passenger",
+        metric_col="first_arrival_tod_hr",
+        title="Passenger trains — first arrival time-of-day at network",
+        y_title="First arrival time-of-day (hour)",
+    )
+    if fig is None:
+        st.info("No passenger first-arrival data available.")
+    else:
+        st.plotly_chart(fig, width="stretch")
+
+    fig = make_boxplot(
+        freight_df,
+        group_name="Freight / Other",
+        metric_col="first_arrival_tod_hr",
+        title="Freight / Other trains — first arrival time-of-day at network",
+        y_title="First arrival time-of-day (hour)",
+    )
+    if fig is None:
+        st.info("No freight / other first-arrival data available.")
+    else:
+        st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Last departure time at network")
+
+    fig = make_boxplot(
+        passenger_df,
+        group_name="Passenger",
+        metric_col="last_departure_tod_hr",
+        title="Passenger trains — last departure time-of-day at network",
+        y_title="Last departure time-of-day (hour)",
+    )
+    if fig is None:
+        st.info("No passenger last-departure data available.")
+    else:
+        st.plotly_chart(fig, width="stretch")
+
+    fig = make_boxplot(
+        freight_df,
+        group_name="Freight / Other",
+        metric_col="last_departure_tod_hr",
+        title="Freight / Other trains — last departure time-of-day at network",
+        y_title="Last departure time-of-day (hour)",
+    )
+    if fig is None:
+        st.info("No freight / other last-departure data available.")
+    else:
+        st.plotly_chart(fig, width="stretch")
+
+    summary_table = (
+        run_time.groupby(["train_group", "train_name_short"], dropna=False, observed=True)
+        .agg(
+            train_runs=("train_label", "nunique"),
+            first_arrival_min=("first_arrival_tod_hr", "min"),
+            first_arrival_p25=("first_arrival_tod_hr", lambda x: x.quantile(0.25)),
+            first_arrival_median=("first_arrival_tod_hr", "median"),
+            first_arrival_p75=("first_arrival_tod_hr", lambda x: x.quantile(0.75)),
+            first_arrival_max=("first_arrival_tod_hr", "max"),
+            last_departure_min=("last_departure_tod_hr", "min"),
+            last_departure_p25=("last_departure_tod_hr", lambda x: x.quantile(0.25)),
+            last_departure_median=("last_departure_tod_hr", "median"),
+            last_departure_p75=("last_departure_tod_hr", lambda x: x.quantile(0.75)),
+            last_departure_max=("last_departure_tod_hr", "max"),
+        )
+        .reset_index()
+    )
+
+    with st.expander("Summary table by train name"):
+        safe_dataframe(summary_table, max_rows=20000)
+
+        csv_data = summary_table.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download arrival/departure summary CSV",
+            data=csv_data,
+            file_name="arrival_departure_time_distribution_summary.csv",
+            mime="text/csv",
+        )
+
+    with st.expander("Raw train-run arrival/departure table"):
+        safe_dataframe(
+            run_time[
+                [
+                    "train_label",
+                    "train_name",
+                    "train_name_short",
+                    "train_group",
+                    "first_arrival_seconds",
+                    "last_departure_seconds",
+                    "first_arrival_tod_hr",
+                    "first_arrival_hhmm",
+                    "last_departure_tod_hr",
+                    "last_departure_hhmm",
+                    "records",
+                ]
+            ].sort_values(["train_group", "train_name_short", "first_arrival_tod_hr"]),
+            max_rows=20000,
+        )
+
+        csv_data = run_time.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download raw train-run arrival/departure CSV",
+            data=csv_data,
+            file_name="arrival_departure_time_distribution_raw.csv",
+            mime="text/csv",
+        )
 
 # =====================================================
 # 6. TPC / BASE RUN COMPARISON
