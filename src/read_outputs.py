@@ -1842,7 +1842,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
     st.caption(
         "For each train run, this view uses the first arrival time at the network "
         "and the last departure time at the network. Times are shown as time-of-day "
-        "from 0 to 24 hours. X-axis labels use train_name before the first dash."
+        "from 0 to 24 hours. X-axis labels use Train symbol."
     )
 
     needed_cols = [
@@ -1916,17 +1916,17 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
         help=(
             "This sorting option only changes Freight / Other charts. "
             "Passenger charts stay sorted by median time. "
-            "X-axis labels still use train_name before the first dash."
+            "X-axis labels use Train symbol."
         ),
     )
 
     max_train_names = st.slider(
-        "Maximum train names shown per chart",
+        "Maximum train symbols shown per chart",
         min_value=10,
         max_value=200,
         value=120,
         step=10,
-        help="Use this to keep the boxplot readable if there are many train names.",
+        help="Use this to keep the boxplot readable if there are many train symbols.",
     )
 
     def get_order(plot_df, metric_col, group_name):
@@ -1984,7 +1984,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
             },
             title=title,
             labels={
-                "train_name_short": "Train name",
+                "train_name_short": "Train symbol",
                 metric_col: y_title,
             },
         )
@@ -2001,7 +2001,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
 
         fig.update_xaxes(
             tickangle=-60,
-            title="Train symbols",
+            title="Train symbol",
             showgrid=True,
             gridwidth=0.4,
             gridcolor="rgba(255,255,255,0.15)",
@@ -2026,7 +2026,7 @@ elif st.session_state.active_view == "Arrival/Departure Time Distribution":
     c1, c2, c3 = st.columns(3)
     c1.metric("Passenger train runs", f"{passenger_df['train_label'].nunique():,}")
     c2.metric("Freight / other train runs", f"{freight_df['train_label'].nunique():,}")
-    c3.metric("Train names", f"{run_time['train_name_short'].nunique():,}")
+    c3.metric("Train symbols", f"{run_time['train_name_short'].nunique():,}")
 
     st.subheader("First arrival time at network")
 
