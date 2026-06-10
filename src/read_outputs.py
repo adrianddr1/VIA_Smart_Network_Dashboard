@@ -1345,7 +1345,7 @@ elif st.session_state.active_view == "Speed Distribution by Train Name":
         y="avg_speed_mph",
         color="train_type",
         points="outliers",
-        title="Average Speed Distribution by Train Name (TEST)",
+        title="Average Speed Distribution by Train Name",
         labels={
             "train_name": "Train Name",
             "avg_speed_mph": "Average Speed (mph)",
