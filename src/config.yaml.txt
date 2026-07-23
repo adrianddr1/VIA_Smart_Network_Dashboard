@@ -10,14 +10,6 @@ credentials:
       email: adrian.diaz-de-rivera@db-eco.us
       name: Adrian
       password: adrian.diaz-de-rivera@db-eco.us
-    Evan:
-      email: evan.e.bangs@db-eco.us
-      name: Evan
-      password: evan.e.bangs@db-eco.us  
-    Angel:
-      email: angel.jacome@db-eco.us
-      name: Angel
-      password: angel.jacome@db-eco.us  
 
 cookie:
   expiry_days: 1
