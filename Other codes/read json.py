@@ -14,15 +14,15 @@ import pandas as pd
 # FILE PATHS
 # =====================================================
 OUTPUT_FILE = Path(
-    r"C:\Users\DiazdeRiveraA\OneDrive - DB E.C.O. North America\2-4025 VIA Rail Expert Support - Documents\05 WORK PACKAGES\12 EXO RTC Model\04 - CN Traffic\TOR_MNT_base_Plant-input-UC-3-output-RT_F0_P0_.json"
+    r"C:\Users\ZhaoJ\OneDrive - DB E.C.O. North America\Desktop\VIA Dashboards\Inputs\TOR_SAR_KMK_WIN_2019_base_traffic_CTA-input-UC-1-output-RT_F0_P0_.json"
 )
 
 DP_FILE = Path(
-    r"C:\Users\DiazdeRiveraA\OneDrive - DB E.C.O. North America\2-4025 VIA Rail Expert Support - Documents\05 WORK PACKAGES\12 EXO RTC Model\04 - CN Traffic\TOR_MNT_base_Plant-input-UC-3.json"
+    r"C:\Users\ZhaoJ\OneDrive - DB E.C.O. North America\Desktop\VIA Dashboards\Inputs\TOR_SAR_KMK_WIN_2019_base_traffic_CTA-input-UC-1.json"
 )
 
 RESULTS_PATH = Path(
-    r"C:\Users\DiazdeRiveraA\OneDrive - DB E.C.O. North America\2-4025 VIA Rail Expert Support - Documents\05 WORK PACKAGES\12 EXO RTC Model\06 - .TRAIN file"
+    r"C:\Users\ZhaoJ\OneDrive - DB E.C.O. North America\Desktop\VIA Dashboards\processed"
 )
 
 RESULTS_PATH.mkdir(exist_ok=True)
