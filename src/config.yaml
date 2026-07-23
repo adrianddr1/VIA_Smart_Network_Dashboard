@@ -16,6 +16,14 @@ credentials:
       email: john@irelandrailadvisory.com
       name: John
       password: john@irelandrailadvisory.com
+     Evan:
+       email: evan.e.bangs@db-eco.us
+       name: Evan
+       password: evan.e.bangs@db-eco.us  
+     Angel:
+       email: angel.jacome@db-eco.us
+       name: Angel
+       password: angel.jacome@db-eco.us  
 
 cookie:
   expiry_days: 1
